@@ -1,0 +1,49 @@
+[project]
+name = "cater"
+version = "0.1.0"
+description = ""
+requires-python = ">=3.13,<4.0.0"
+
+[tool.poetry]
+package-mode = false
+
+[tool.poetry.dependencies]
+argon2-cffi = "^25.1.0"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.group.search.dependencies]
+langchain-qdrant = "^1.1.0,<2.0.0"
+
+[tool.poetry.group.server.dependencies]
+fastapi = {extras = ["standard"], version = "^0.136.3"}
+celery = {extras = ["redis"], version = "^5.6.3"}
+httpx = "^0.28.1"
+sqlalchemy = "^2.0.50"
+pydantic = "^2.13.4"
+asyncpg = "^0.31.0"
+psycopg = {extras = ["binary"], version = "^3.3.4"}
+alembic = "^1.18.4"
+
+[tool.poetry.group.worker.dependencies]
+langchain-text-splitters = "^1.1.2"
+pydantic = "^2.13.4"
+sqlalchemy = "^2.0.50"
+httpx = "^0.28.1"
+celery = "^5.6.3"
+alembic = "^1.18.4"
+asyncpg = "^0.31.0"
+psycopg = {extras = ["binary"], version = "^3.3.4"}
+beautifulsoup4 = "^4.14.3"
+fastembed = "^0.8.0"
+qdrant-client = "^1.18.0"
+nvidia-cudnn-cu12 = "^9.22.0.52"
+nvidia-cuda-runtime-cu12 = "^12.9.79"
+nvidia-cublas-cu12 = "^12.9.2.10"
+onnxruntime-gpu = "^1.26.0"
+
+[tool.poetry.group.embedder.dependencies]
+fastembed = "^0.8.0"
+qdrant-client = "^1.18.0"

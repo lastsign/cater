@@ -1,0 +1,8 @@
+@base_url = http://localhost:8000
+
+# @name index
+POST {{base_url}}/index?url=https://huggingface.co/blog/nvidia/nemotron-labs-diffusion
+
+###
+@token = {{index.response.body.task_id}}
+GET {{base_url}}/index/{{token}}
