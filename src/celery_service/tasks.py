@@ -3,19 +3,23 @@ from celery import chain
 
 # from src.storage import save_text, load_text, save_chunk, load_chunk
 from src.celery_service.celery_conn import app
-from src.storage import save_text, load_text, save_chunks
+from src.storage import save_text, load_text, save_chunks, get_status, set_status, ContentStatus
 from src.embedder.indexer import index_document
 
 
-@app.task(name="fetch_hugging_face_url", autoretry_for=(httpx.HTTPError,),
+@app.task(name="fetch_hugging_face_url", bind=True, autoretry_for=(httpx.HTTPError,),
           retry_backoff=True, max_retries=3)
-def fetch_hugging_face_url(url: str):
+def fetch_hugging_face_url(self, url: str):
     text = httpx.get(url, timeout=30).text
     from bs4 import BeautifulSoup
     soup = BeautifulSoup(text, "html.parser")
     title = soup.title.string
     full_text = soup.get_text(strip=True)
-    doc_id = save_text(url, full_text, title)
+    doc_id, is_new = save_text(url, full_text, title)
+    if not is_new:
+        info = get_status(doc_id)
+        if info and info["status"] == ContentStatus.INDEXED:
+            self.request.chain = None
     return doc_id
 
 
@@ -39,6 +43,7 @@ def split_into_chunks(doc_id: str) -> list[str]:
     chunks = text_splitter.create_documents([document_text])
 
     save_chunks(chunks, doc_id)
+    set_status(doc_id, ContentStatus.CHUNKED)
 
     return doc_id
 
@@ -46,6 +51,7 @@ def split_into_chunks(doc_id: str) -> list[str]:
 @app.task(name="embed_and_upsert_chunks")
 def embed_and_upsert_chunks(doc_id: str, collection: str = "hugging-face-collection"):
     vec_count = index_document(doc_id, collection)
+    set_status(doc_id, ContentStatus.INDEXED)
     return vec_count
 
 

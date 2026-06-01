@@ -2,7 +2,10 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Annotated
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
+from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
+from src.db import get_db
+from src.models.content import Content
 from src.realtime.listener import run_listener
 from src.realtime.dispatcher import dispatcher
 
@@ -59,8 +62,30 @@ def index(url: str):
     return {"task_id": async_result.id}
 
 @app.get("/index/{task_id}")
-async def status(task_id: str):
+async def status(task_id: str, db: Annotated[AsyncSession, Depends(get_db)]):
     from src.celery_service.celery_conn import app as celery_app
     from celery.result import AsyncResult
+
     res = AsyncResult(task_id, app=celery_app)
-    return {"state": res.state, "result": res.result if res.ready() else None}
+
+    # doc_id протекает по цепочке как результат первой задачи (fetch);
+    # дойдём до корня и достанем его (save_text может вернуть кортеж (doc_id, is_new))
+    root = res
+    while root.parent is not None:
+        root = root.parent
+    doc_id = root.result
+    if isinstance(doc_id, (list, tuple)):
+        doc_id = doc_id[0]
+
+    content = await db.get(Content, UUID(doc_id)) if doc_id else None
+    if content is None:
+        return {"task_id": task_id, "state": res.state, "status": None}
+
+    return {
+        "task_id": task_id,
+        "state": res.state,
+        "doc_id": str(content.id),
+        "status": content.status,
+        "title": content.title,
+        "source_url": content.source_url,
+    }
