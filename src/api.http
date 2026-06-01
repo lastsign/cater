@@ -6,3 +6,52 @@ POST {{base_url}}/index?url=https://huggingface.co/blog/nvidia/nemotron-labs-dif
 ###
 @token = {{index.response.body.task_id}}
 GET {{base_url}}/index/{{token}}
+
+###
+# @name index_mellum2
+POST {{base_url}}/index?url=https://huggingface.co/blog/JetBrains/mellum2-launch
+
+###
+GET {{base_url}}/index/{{index_mellum2.response.body.task_id}}
+
+###
+# @name index_cosmos3
+POST {{base_url}}/index?url=https://huggingface.co/blog/nvidia/cosmos-3-for-physical-ai
+
+###
+GET {{base_url}}/index/{{index_cosmos3.response.body.task_id}}
+
+###
+# @name index_agent_glossary
+POST {{base_url}}/index?url=https://huggingface.co/blog/agent-glossary
+
+###
+GET {{base_url}}/index/{{index_agent_glossary.response.body.task_id}}
+
+###
+# @name index_ettin
+POST {{base_url}}/index?url=https://huggingface.co/blog/ettin-reranker
+
+###
+GET {{base_url}}/index/{{index_ettin.response.body.task_id}}
+
+###
+# @name index_paddleocr
+POST {{base_url}}/index?url=https://huggingface.co/blog/PaddlePaddle/paddleocr-transformers
+
+###
+GET {{base_url}}/index/{{index_paddleocr.response.body.task_id}}
+
+###
+# @name index_continuous_async
+POST {{base_url}}/index?url=https://huggingface.co/blog/continuous_async
+
+###
+GET {{base_url}}/index/{{index_continuous_async.response.body.task_id}}
+
+###
+# @name index_fm_blocks
+POST {{base_url}}/index?url=https://huggingface.co/blog/amazon/foundation-model-building-blocks
+
+###
+GET {{base_url}}/index/{{index_fm_blocks.response.body.task_id}}

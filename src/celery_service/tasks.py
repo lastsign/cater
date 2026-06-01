@@ -15,11 +15,10 @@ def fetch_hugging_face_url(self, url: str):
     soup = BeautifulSoup(text, "html.parser")
     title = soup.title.string
     full_text = soup.get_text(strip=True)
-    doc_id, is_new = save_text(url, full_text, title)
-    if not is_new:
-        info = get_status(doc_id)
-        if info and info["status"] == ContentStatus.INDEXED:
-            self.request.chain = None
+    doc_id, _ = save_text(url, full_text, title)
+    # Цепочку НЕ рвём: иначе последняя задача навсегда зависает в PENDING и
+    # /index/{task_id} не может дойти до doc_id. Дедуп делают split/embed —
+    # они идемпотентны и пропускают работу, если документ уже проиндексирован.
     return doc_id
 
 
@@ -28,7 +27,11 @@ def fetch_url(url):
 
 
 @app.task(name="split_into_chunks")
-def split_into_chunks(doc_id: str) -> list[str]:
+def split_into_chunks(doc_id: str) -> str:
+    info = get_status(doc_id)
+    if info and info["status"] == ContentStatus.INDEXED:
+        return doc_id  # уже проиндексирован — пропускаем, doc_id отдаём дальше
+
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 
     text_splitter = RecursiveCharacterTextSplitter(
@@ -50,6 +53,10 @@ def split_into_chunks(doc_id: str) -> list[str]:
 
 @app.task(name="embed_and_upsert_chunks")
 def embed_and_upsert_chunks(doc_id: str, collection: str = "hugging-face-collection"):
+    info = get_status(doc_id)
+    if info and info["status"] == ContentStatus.INDEXED:
+        return 0  # уже проиндексирован — пропускаем
+
     vec_count = index_document(doc_id, collection)
     set_status(doc_id, ContentStatus.INDEXED)
     return vec_count

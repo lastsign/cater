@@ -81,3 +81,7 @@ def hybrid_search(
         )
         for p in result.points
     ]
+
+if __name__ == "__main__":
+    res = hybrid_search("nvidia", rerank=False)
+    print(res)

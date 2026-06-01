@@ -22,7 +22,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-@app.WebSocket("/ws/requests/{requests_id}")
+@app.websocket("/ws/requests/{request_id}")
 async def ws_request(ws: WebSocket, request_id: UUID):
     await ws.accept()
     await dispatcher.subscribe(request_id, ws)
@@ -30,7 +30,7 @@ async def ws_request(ws: WebSocket, request_id: UUID):
         snapshot = await load_request_snapshot(request_id)
         await ws.send_json(snapshot)
         while True:
-            await ws.recieve_text()
+            await ws.receive_text()
     except WebSocketDisconnect:
         pass
     finally:
@@ -68,16 +68,23 @@ async def status(task_id: str, db: Annotated[AsyncSession, Depends(get_db)]):
 
     res = AsyncResult(task_id, app=celery_app)
 
-    # doc_id протекает по цепочке как результат первой задачи (fetch);
-    # дойдём до корня и достанем его (save_text может вернуть кортеж (doc_id, is_new))
-    root = res
-    while root.parent is not None:
-        root = root.parent
-    doc_id = root.result
+    # doc_id протекает по цепочке как результат первой задачи (fetch).
+    # AsyncResult.parent НЕ восстанавливается из бэкенда по голому task_id
+    # (всегда None), поэтому идём по сохранённому parent_id в meta до корня.
+    backend = celery_app.backend
+    root_meta = backend.get_task_meta(task_id)
+    while root_meta.get("parent_id"):
+        root_meta = backend.get_task_meta(root_meta["parent_id"])
+    doc_id = root_meta.get("result")
     if isinstance(doc_id, (list, tuple)):
         doc_id = doc_id[0]
 
-    content = await db.get(Content, UUID(doc_id)) if doc_id else None
+    content = None
+    if isinstance(doc_id, str):
+        try:
+            content = await db.get(Content, UUID(doc_id))
+        except ValueError:
+            content = None
     if content is None:
         return {"task_id": task_id, "state": res.state, "status": None}
 
