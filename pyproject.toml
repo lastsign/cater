@@ -4,46 +4,83 @@ version = "0.1.0"
 description = ""
 requires-python = ">=3.13,<4.0.0"
 
-[tool.poetry]
-package-mode = false
+[dependency-groups]
+search = [
+    "langchain-qdrant>=1.1.0,<2.0.0"
+]
 
-[tool.poetry.dependencies]
-argon2-cffi = "^25.1.0"
+server = [
+    "fastapi[standard]>=0.136.3",
+    "celery[redis]>=5.6.3",
+    "httpx>=0.28.1",
+    "sqlalchemy>=2.0.50",
+    "pydantic>=2.13.4",
+    "asyncpg>=0.31.0",
+    "psycopg[binary]>=3.3.4",
+    "alembic>=1.18.4",
+]
 
-[build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+worker = [
+    "langchain-text-splitters>=1.1.2",
+    "pydantic>=2.13.4",
+    "sqlalchemy>=2.0.50",
+    "httpx>=0.28.1",
+    "celery>=5.6.3",
+    "alembic>=1.18.4",
+    "asyncpg>=0.31.0",
+    "psycopg[binary]>=3.3.4",
+    "beautifulsoup4>=4.14.3",
+    "fastembed>=0.8.0",
+    "qdrant-client>=1.18.0",
+    "nvidia-cudnn-cu12>=9.22.0.52",
+    "nvidia-cuda-runtime-cu12>=12.9.79",
+    "nvidia-cublas-cu12>=12.9.2.10",
+    "onnxruntime-gpu>=1.26.0",
+]
 
-[tool.poetry.group.search.dependencies]
-langchain-qdrant = "^1.1.0,<2.0.0"
+embedder = [
+    "fastembed>=0.8.0",
+    "qdrant-client>=1.18.0"
+]
 
-[tool.poetry.group.server.dependencies]
-fastapi = {extras = ["standard"], version = "^0.136.3"}
-celery = {extras = ["redis"], version = "^5.6.3"}
-httpx = "^0.28.1"
-sqlalchemy = "^2.0.50"
-pydantic = "^2.13.4"
-asyncpg = "^0.31.0"
-psycopg = {extras = ["binary"], version = "^3.3.4"}
-alembic = "^1.18.4"
+[tool.pyright]
+# --- what to check ---
+include = ["src", "scripts", "main.py"]
+exclude = [
+    "**/__pycache__",
+    "**/.venv",
+    ".venv",
+    "alembic/versions",   # автогенерённые миграции — не наш код
+    "data",
+]
 
-[tool.poetry.group.worker.dependencies]
-langchain-text-splitters = "^1.1.2"
-pydantic = "^2.13.4"
-sqlalchemy = "^2.0.50"
-httpx = "^0.28.1"
-celery = "^5.6.3"
-alembic = "^1.18.4"
-asyncpg = "^0.31.0"
-psycopg = {extras = ["binary"], version = "^3.3.4"}
-beautifulsoup4 = "^4.14.3"
-fastembed = "^0.8.0"
-qdrant-client = "^1.18.0"
-nvidia-cudnn-cu12 = "^9.22.0.52"
-nvidia-cuda-runtime-cu12 = "^12.9.79"
-nvidia-cublas-cu12 = "^12.9.2.10"
-onnxruntime-gpu = "^1.26.0"
+# ============================================================
+# ty (Astral) — экспериментальный type checker на Rust.
+# Запуск:  uvx ty check   (или: uv run ty check)
+# Конфиг отдельный от pyright; держим рядом, чтобы сравнивать.
+# NB: ty в preview — схема настроек может меняться между версиями.
+# ============================================================
+[tool.ty.environment]
+python-version = "3.13"
+python = ".venv"          # путь к venv, откуда брать установленные пакеты
 
-[tool.poetry.group.embedder.dependencies]
-fastembed = "^0.8.0"
-qdrant-client = "^1.18.0"
+[tool.ty.src]
+include = ["src", "scripts", "main.py"]
+exclude = [
+    "**/__pycache__",
+    ".venv",
+    "alembic/versions",   # автогенерённые миграции
+    "data",
+]
+
+[tool.ty.terminal]
+output-format = "full"    # full | concise
+# error-on-warning = true # включить, если в CI хотим падать и на warning'ах
+
+[tool.ty.rules]
+# Значения: "error" | "warn" | "ignore". Имена правил — kebab-case.
+unresolved-import = "error"
+possibly-missing-import = "warn"
+unused-ignore-comment = "warn"
+# Либы без stubs (qdrant/fastembed/nvidia/onnx) — не шумим на «неизвестных» типах:
+redundant-cast = "warn"
