@@ -1,14 +1,14 @@
-"""Фан-аут статусных событий по WS-подписчикам одного request_id.
+"""Fan-out of status events to the WS subscribers of one request_id.
 
-Два решения, из которых состоит модуль:
+The module rests on two decisions:
 
-1. Подписка — это очередь на соединение, а не сам WebSocket. publish никогда не
-   ждёт клиента: медленный или залипший браузер терял бы события, но не тормозил
-   бы Kafka-pump, а тормозил он бы его на всю группу index.events.
-2. Буфер последних событий по request_id. Между «HTTP отдал request_id» и
-   «клиент открыл WS» проходят десятки миллисекунд, а fetch укладывается в
-   сотни — событие с doc_id уходило бы в никуда. При subscribe буфер отдаётся
-   как replay, поэтому doc_id клиент получает даже если опоздал.
+1. A subscription is a per-connection queue, not the WebSocket itself. publish never
+   waits for a client: a slow or stuck browser loses events but does not slow down the
+   Kafka pump - and slowing it down would hold up the whole index.events group.
+2. A buffer of recent events per request_id. Tens of milliseconds pass between "HTTP
+   returned the request_id" and "the client opened the WS", while fetch finishes in
+   hundreds - so the event carrying doc_id would go nowhere. On subscribe the buffer is
+   handed over as a replay, so the client gets the doc_id even if it was late.
 """
 
 from __future__ import annotations
@@ -22,17 +22,17 @@ from uuid import UUID
 
 log = logging.getLogger(__name__)
 
-# Сколько держать события запроса после последнего апдейта и сколько их помнить.
+# How long to keep a request's events after the last update, and how many to remember.
 BUFFER_TTL_S = float(os.getenv("WS_BUFFER_TTL_S", "900"))
 BUFFER_MAX_EVENTS = int(os.getenv("WS_BUFFER_MAX_EVENTS", "32"))
 BUFFER_MAX_REQUESTS = int(os.getenv("WS_BUFFER_MAX_REQUESTS", "10000"))
-# Глубина очереди соединения. Переполнение = клиент не читает; события с головы
-# не выкидываем — теряем новые и считаем потери, чтобы это было видно в логах.
+# Depth of a connection's queue. Overflow means the client is not reading; we do not
+# drop from the head - we lose the new events and count the losses so they show in logs.
 QUEUE_MAXSIZE = int(os.getenv("WS_QUEUE_MAXSIZE", "256"))
 
 
 class Subscription:
-    """Очередь событий одного WS-соединения."""
+    """Event queue of a single WS connection."""
 
     __slots__ = ("_queue", "dropped", "request_id")
 
@@ -56,13 +56,13 @@ class Subscription:
 class WSDispatcher:
     def __init__(self) -> None:
         self._subs: dict[UUID, set[Subscription]] = defaultdict(set)
-        # request_id -> (время последнего события, последние события)
+        # request_id -> (time of the last event, the recent events)
         self._recent: OrderedDict[UUID, tuple[float, deque[dict]]] = OrderedDict()
 
-    # --- подписки -----------------------------------------------------------
+    # --- subscriptions ------------------------------------------------------
 
     def subscribe(self, request_id: UUID) -> Subscription:
-        """Подписка + replay буфера. Синхронная: в одном loop'е лок не нужен."""
+        """Subscribe plus a replay of the buffer. Synchronous: within one loop no lock is needed."""
         sub = Subscription(request_id, self.replay(request_id))
         self._subs[request_id].add(sub)
         return sub
@@ -79,10 +79,10 @@ class WSDispatcher:
         entry = self._recent.get(request_id)
         return tuple(entry[1]) if entry else ()
 
-    # --- публикация ---------------------------------------------------------
+    # --- publishing ---------------------------------------------------------
 
     async def publish(self, request_id: UUID, payload: dict) -> None:
-        """Вызывается из Kafka-pump и pg-listener'а. Не блокируется ни на чём."""
+        """Called from the Kafka pump and the pg listener. Never blocks on anything."""
         self._remember(request_id, payload)
         for sub in tuple(self._subs.get(request_id, ())):
             sub.offer(payload)
@@ -96,7 +96,7 @@ class WSDispatcher:
         self._prune()
 
     def _prune(self) -> None:
-        """Выкидываем с головы (она же самая старая по обращению): TTL, затем размер."""
+        """Evict from the head (the least recently touched): by TTL first, then by size."""
         now = time.monotonic()
         while self._recent:
             oldest_id, (touched, _) = next(iter(self._recent.items()))

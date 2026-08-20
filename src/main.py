@@ -71,9 +71,9 @@ async def status(task_id: str, db: Annotated[AsyncSession, Depends(get_db)]):
 
     res = AsyncResult(task_id, app=celery_app)
 
-    # doc_id протекает по цепочке как результат первой задачи (fetch).
-    # AsyncResult.parent НЕ восстанавливается из бэкенда по голому task_id
-    # (всегда None), поэтому идём по сохранённому parent_id в meta до корня.
+    # doc_id flows down the chain as the result of the first task (fetch).
+    # AsyncResult.parent is NOT restored from the backend for a bare task_id (it is
+    # always None), so we walk the parent_id stored in meta up to the root.
     backend = celery_app.backend
     root_meta = backend.get_task_meta(task_id)
     while root_meta.get("parent_id"):

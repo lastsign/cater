@@ -1,12 +1,12 @@
-"""WS-ручка статуса запроса: снапшот + живой поток из index.events.
+"""WS endpoint for request status: a snapshot plus the live stream from index.events.
 
-Порядок операций в stream_request — единственное, что здесь по-настоящему важно:
+The order of operations in stream_request is the only thing here that truly matters:
 
     accept -> subscribe -> snapshot -> live
 
-Подписка ДО чтения снапшота: между SELECT и подпиской успевает пролететь
-событие, и оно бы пропало. Обратная сторона — дубли (событие есть и в снапшоте,
-и в очереди), поэтому дедуп по event_id, а не по порядку.
+Subscribing BEFORE reading the snapshot: an event can slip through between the SELECT
+and the subscription and would be lost. The flip side is duplicates (an event present
+both in the snapshot and in the queue), hence dedup by event_id rather than by order.
 """
 
 from __future__ import annotations
@@ -25,17 +25,18 @@ from src.storage import load_request_snapshot
 
 log = logging.getLogger(__name__)
 
-# Пауза, после которой шлём ping: WS без трафика рубят прокси (nginx — 60с).
+# Idle time after which we send a ping: proxies cut WS connections without traffic
+# (nginx does it after 60s).
 HEARTBEAT_S = float(os.getenv("WS_HEARTBEAT_S", "25"))
-# Сколько event_id помнить для дедупа снапшот/replay/live.
+# How many event_ids to remember for snapshot/replay/live dedup.
 SEEN_MAX = 256
 
 
 async def _wait_disconnect(ws: WebSocket) -> None:
-    """Единственная задача — заметить, что клиент ушёл.
+    """Its only job is to notice that the client is gone.
 
-    Читать входящие всё равно надо: без receive Starlette не увидит close-фрейм,
-    и соединение останется висеть вместе с подпиской.
+    Incoming messages have to be read anyway: without a receive, Starlette never sees
+    the close frame and the connection hangs around together with the subscription.
     """
     try:
         while True:
@@ -67,9 +68,9 @@ async def stream_request(
             return
 
         while True:
-            # Задачу ожидания события держим между итерациями: пересоздавать её
-            # после каждого heartbeat нельзя — cancel съел бы уже вынутое из
-            # очереди событие.
+            # The event-waiting task is kept between iterations: recreating it after
+            # every heartbeat is not allowed - the cancel would swallow an event that
+            # has already been taken out of the queue.
             if pending is None:
                 pending = asyncio.create_task(sub.get())
             done, _ = await asyncio.wait(
@@ -107,4 +108,4 @@ async def stream_request(
         try:
             await ws.close()
         except RuntimeError:
-            pass  # уже закрыт клиентом
+            pass  # already closed by the client

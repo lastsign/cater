@@ -14,11 +14,11 @@ def _now() -> datetime:
 
 
 class Envelope[PayloadT](BaseModel):
-    """Общая обёртка всех сообщений пайплайна.
+    """Common wrapper for every pipeline message.
 
-    request_id тянется через все стадии — по нему клиент подписывается на статус
-    (WS / index.events) ещё до того, как появится doc_id.
-    attempt увеличивается при переотправке из DLQ.
+    request_id is carried through all stages - the client subscribes to status by it
+    (WS / index.events) even before a doc_id exists.
+    attempt is incremented when the message is re-sent from the DLQ.
     """
 
     event_id: uuid.UUID = Field(default_factory=uuid.uuid4)
@@ -36,14 +36,16 @@ class Envelope[PayloadT](BaseModel):
 class IndexRequest(BaseModel):
     url: str
     collection: str | None = None
-    force: bool = False  # переиндексировать, даже если документ уже INDEXED
+    force: bool = False  # reindex even if the document is already INDEXED
 
 
 class ContentFetched(BaseModel):
     doc_id: str
     url: str
     title: str | None = None
-    is_new: bool = True  # False — контент уже был в БД (дедуп по content_hash)
+    is_new: bool = (
+        True  # False - the content was already in the DB (dedup by content_hash)
+    )
     collection: str | None = None
     force: bool = False
 
@@ -59,11 +61,11 @@ class IndexDone(BaseModel):
     doc_id: str
     vectors: int
     collection: str
-    skipped: bool = False  # документ уже был проиндексирован, работу не делали
+    skipped: bool = False  # the document was already indexed, no work was done
 
 
 class StatusEvent(BaseModel):
-    """Статусное событие для index.events: WS-пуш, метрики, отладка."""
+    """Status event for index.events: WS push, metrics, debugging."""
 
     stage: str
     status: str
@@ -73,7 +75,7 @@ class StatusEvent(BaseModel):
 
 
 class StageFailed(BaseModel):
-    """Тело сообщения в DLQ: исходный payload + контекст падения."""
+    """Body of a DLQ message: the original payload plus the failure context."""
 
     stage: str
     topic: str
@@ -82,4 +84,4 @@ class StageFailed(BaseModel):
     error: str
     error_type: str
     key: str | None = None
-    raw: str | None = None  # сырое тело исходного сообщения (utf-8, с заменой)
+    raw: str | None = None  # raw body of the original message (utf-8, with replacement)

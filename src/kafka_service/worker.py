@@ -1,9 +1,9 @@
-"""Стадийный воркер: consume -> handler -> produce -> commit.
+"""Stage worker: consume -> handler -> produce -> commit.
 
-Порядок в конце цикла принципиален: сначала flush продюсера, потом commit оффсета.
-Обратный порядок теряет работу — оффсет уже сдвинут, а сообщение следующей стадии
-может не долететь. Текущий порядок даёт at-least-once: в худшем случае стадия
-отработает дважды (все три стадии идемпотентны — см. stages.py).
+The order at the end of the loop is essential: flush the producer first, commit the
+offset second. The reverse order loses work - the offset has already advanced while
+the next stage's message may never arrive. The current order gives at-least-once: in
+the worst case a stage runs twice (all three stages are idempotent - see stages.py).
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ def _emit_all(producer: SyncProducer, emits: Sequence[Emit], env: Envelope) -> N
 
 
 def _wrap(type_: str, payload, env: Envelope | None) -> Envelope:
-    """Наследует request_id/attempt исходного сообщения; для битого тела — новый request_id."""
+    """Inherits request_id/attempt of the source message; a broken body gets a new one."""
     extra = {"request_id": env.request_id, "attempt": env.attempt} if env else {}
     return Envelope(type=type_, payload=payload, **extra)
 
@@ -78,16 +78,16 @@ def _to_dlq(
 
 
 def _handle_with_retries(stage: Stage, env: Envelope) -> Sequence[Emit]:
-    """Ретраи внутри процесса: без переотправки в Kafka и без сдвига оффсета.
+    """In-process retries: no re-send through Kafka and no offset movement.
 
-    Пока идут попытки, партиция не обрабатывается — поэтому суммарное время
-    ретраев обязано укладываться в max.poll.interval.ms стадии.
+    While the attempts run, the partition is not being processed - so the total retry
+    time must fit into the stage's max.poll.interval.ms.
     """
     last: Exception | None = None
     for attempt in range(1, stage.max_attempts + 1):
         try:
             return stage.handler(env.payload, env)
-        except Exception as exc:  # noqa: BLE001 — решение о фатальности принимаем ниже
+        except Exception as exc:  # noqa: BLE001 - fatality is decided below
             last = exc
             log.warning(
                 "stage=%s attempt=%d/%d failed: %s",
@@ -108,7 +108,7 @@ def _process(
     try:
         env = Envelope[stage.payload_model].model_validate_json(msg.value() or b"")
     except ValidationError as exc:
-        # Битое сообщение ретраить бессмысленно — сразу в DLQ.
+        # Retrying a malformed message is pointless - straight to the DLQ.
         log.error(
             "stage=%s malformed message at %s[%d]@%d: %s",
             stage.name,
@@ -164,14 +164,14 @@ def run_stage(stage_name: str, stop: threading.Event | None = None) -> None:
             _process(stage, msg, producer, consumer)
     finally:
         producer.flush()
-        # close() коммитит то, что уже сохранено, и корректно покидает группу —
-        # ребаланс проходит сразу, без ожидания session.timeout.
+        # close() commits what has already been stored and leaves the group cleanly -
+        # the rebalance happens at once, without waiting for session.timeout.
         consumer.close()
         log.info("stage=%s stopped", stage.name)
 
 
 def stop_event_with_signals() -> threading.Event:
-    """Event, который взводится по SIGINT/SIGTERM — цикл дорабатывает сообщение и выходит."""
+    """Event set on SIGINT/SIGTERM - the loop finishes the message and exits."""
     stop = threading.Event()
 
     def _shutdown(signum, frame):
@@ -184,10 +184,10 @@ def stop_event_with_signals() -> threading.Event:
 
 
 def run_stages(stage_names: Sequence[str]) -> None:
-    """Несколько стадий в одном процессе (по потоку на стадию) — для локального запуска.
+    """Several stages in one process (a thread per stage) - for local runs.
 
-    В проде каждая стадия — отдельный процесс/под: у них разный профиль нагрузки
-    (fetch — сеть, embed — GPU) и масштабировать их нужно независимо.
+    In production each stage is a separate process/pod: they have different load
+    profiles (fetch is network-bound, embed is GPU-bound) and must scale independently.
     """
     stop = stop_event_with_signals()
 

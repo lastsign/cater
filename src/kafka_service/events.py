@@ -1,8 +1,8 @@
-"""Проекция сообщений index.events в плоский вид для WS и для БД.
+"""Projection of index.events messages into a flat shape for WS and for the DB.
 
-Kafka-конверт (`Envelope[StatusEvent]`) неудобно отдавать в браузер и хранить в
-Postgres: одна и та же форма нужна и pump'у (WS), и проектору (снапшот), поэтому
-она живёт здесь, а не в двух местах.
+The Kafka envelope (`Envelope[StatusEvent]`) is awkward to hand to a browser and to
+store in Postgres: the very same shape is needed both by the pump (WS) and by the
+projector (snapshot), so it lives here instead of in two places.
 """
 
 from __future__ import annotations
@@ -13,13 +13,13 @@ from src.kafka_service.schemas import Envelope, StatusEvent
 
 log = logging.getLogger(__name__)
 
-# Состояния, после которых по этому request_id больше ничего не придёт:
-# indexed — документ в Qdrant, skipped — уже был проиндексирован, failed — DLQ.
+# States after which nothing more will arrive for this request_id:
+# indexed - the document is in Qdrant, skipped - it was already indexed, failed - DLQ.
 TERMINAL_STATUSES = frozenset({"indexed", "skipped", "failed"})
 
-# Порядок прогресса. Нужен проектору: события двух стадий могут прийти
-# в обратном порядке (fetch-падение уходит в index.events с ключом url,
-# остальные — с ключом doc_id, то есть в другую партицию).
+# Progress ordering. The projector needs it: events of two stages may arrive out of
+# order (a fetch failure goes to index.events keyed by url, the rest are keyed by
+# doc_id, i.e. land in a different partition).
 STATUS_RANK = {"pending": 0, "fetched": 1, "chunked": 2, "indexed": 3}
 
 
@@ -28,7 +28,7 @@ def is_final(status: str | None) -> bool:
 
 
 def status_view(env: Envelope[StatusEvent], seq: int | None = None) -> dict:
-    """Плоское событие статуса. seq — оффсет в index.events (для дедупа/отладки)."""
+    """Flat status event. seq is the offset in index.events (for dedup/debugging)."""
     p = env.payload
     return {
         "type": "status",
@@ -46,7 +46,7 @@ def status_view(env: Envelope[StatusEvent], seq: int | None = None) -> dict:
 
 
 def parse_status_event(raw: bytes | None, seq: int | None = None) -> dict | None:
-    """Байты сообщения -> плоское событие. None, если тело не статусное/битое."""
+    """Message bytes -> flat event. None if the body is not a status event or is broken."""
     try:
         env = Envelope[StatusEvent].model_validate_json(raw or b"")
     except Exception:
@@ -56,11 +56,11 @@ def parse_status_event(raw: bytes | None, seq: int | None = None) -> dict | None
 
 
 def supersedes(old_status: str | None, new_status: str | None) -> bool:
-    """Двигать ли статус запроса вперёд.
+    """Whether to move the request status forward.
 
-    Терминальное состояние применяем всегда (это конец истории), прогресс —
-    только вперёд по STATUS_RANK, но после failed разрешаем начать заново:
-    replay из DLQ пролетает по тем же стадиям с тем же request_id.
+    A terminal state is always applied (it is the end of the story), progress only
+    moves forward along STATUS_RANK, but after failed we allow starting over: a DLQ
+    replay goes through the same stages with the same request_id.
     """
     if old_status is None or old_status == "failed":
         return True

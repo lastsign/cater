@@ -1,14 +1,14 @@
-"""CLI сервиса.
+"""Service CLI.
 
-python -m src.kafka_service topics                 # создать топики
-python -m src.kafka_service run fetch              # воркер одной стадии
-python -m src.kafka_service run fetch chunk embed  # все стадии в одном процессе (dev)
-python -m src.kafka_service submit <url>           # положить запрос в index.requests
-python -m src.kafka_service tail index.events      # смотреть поток событий
-python -m src.kafka_service replay                 # вернуть DLQ в исходные топики
-python -m src.kafka_service run-projector          # index.events -> таблица request
-python -m src.kafka_service run-cdc                # CDC-синк: удаления chunks -> Qdrant
-python -m src.kafka_service sweep                  # разовая чистка осиротевших точек
+python -m src.kafka_service topics                 # create the topics
+python -m src.kafka_service run fetch              # worker for a single stage
+python -m src.kafka_service run fetch chunk embed  # all stages in one process (dev)
+python -m src.kafka_service submit <url>           # put a request into index.requests
+python -m src.kafka_service tail index.events      # watch the event stream
+python -m src.kafka_service replay                 # return the DLQ to the source topics
+python -m src.kafka_service run-projector          # index.events -> the request table
+python -m src.kafka_service run-cdc                # CDC sink: chunks deletes -> Qdrant
+python -m src.kafka_service sweep                  # one-off cleanup of orphaned points
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ def _tail(topic: str, group: str | None) -> None:
 
 
 def _replay(limit: int) -> int:
-    """Читает DLQ и возвращает сообщения в топик, на котором они упали."""
+    """Reads the DLQ and returns messages to the topic they failed on."""
     consumer = build_consumer("cater.dlq.replay", [TOPIC_DLQ])
     producer = SyncProducer()
     replayed = 0
@@ -108,7 +108,7 @@ def _replay(limit: int) -> int:
 
 
 async def _run_projector() -> None:
-    """Проектор отдельным процессом — альтернатива запуску его в lifespan FastAPI."""
+    """The projector as its own process - an alternative to running it in the FastAPI lifespan."""
     from src.kafka_service.projector import run_status_projector
 
     stop = asyncio.Event()
@@ -129,31 +129,31 @@ def main() -> None:
     parser.add_argument("--log-level", default="INFO")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("topics", help="создать недостающие топики")
+    sub.add_parser("topics", help="create the missing topics")
 
-    run_p = sub.add_parser("run", help="запустить воркеры стадий")
+    run_p = sub.add_parser("run", help="start the stage workers")
     run_p.add_argument("stages", nargs="+", choices=sorted(STAGES))
     run_p.add_argument("--ensure-topics", action="store_true")
 
-    submit_p = sub.add_parser("submit", help="отправить url в index.requests")
+    submit_p = sub.add_parser("submit", help="send a url to index.requests")
     submit_p.add_argument("url")
     submit_p.add_argument("--collection", default=None)
     submit_p.add_argument("--force", action="store_true")
 
-    tail_p = sub.add_parser("tail", help="печатать сообщения топика")
+    tail_p = sub.add_parser("tail", help="print the messages of a topic")
     tail_p.add_argument("topic", nargs="?", default=TOPIC_INDEX_EVENTS)
     tail_p.add_argument("--group", default=None)
 
-    replay_p = sub.add_parser("replay", help="переотправить сообщения из DLQ")
+    replay_p = sub.add_parser("replay", help="re-send messages from the DLQ")
     replay_p.add_argument("--limit", type=int, default=100)
 
     sub.add_parser(
-        "run-projector", help="index.events -> таблица request (снапшоты для WS)"
+        "run-projector", help="index.events -> the request table (snapshots for WS)"
     )
 
-    sub.add_parser("run-cdc", help="CDC-синк: удаления chunks -> Qdrant")
+    sub.add_parser("run-cdc", help="CDC sink: chunks deletes -> Qdrant")
 
-    sweep_p = sub.add_parser("sweep", help="удалить осиротевшие точки в коллекции")
+    sweep_p = sub.add_parser("sweep", help="delete orphaned points in a collection")
     sweep_p.add_argument("--collection", default=DEFAULT_COLLECTION)
     sweep_p.add_argument("--batch", type=int, default=1000)
     sweep_p.add_argument("--dry-run", action="store_true")

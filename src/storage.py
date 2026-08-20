@@ -21,11 +21,11 @@ class ContentStatus:
 
 
 def save_text(url: str, text: str, title: str) -> tuple[str, bool]:
-    """Сохраняет Content, дедуп по content_hash.
+    """Stores a Content row, deduplicated by content_hash.
 
-    Возвращает (doc_id, is_new). is_new=False — документ уже был, новый ContentText
-    и чанки создавать не нужно, пайплайн индексации можно не запускать.
-    Новая строка создаётся со status='fetched'.
+    Returns (doc_id, is_new). is_new=False means the document already existed, so a new
+    ContentText and chunks need not be created and the indexing pipeline can be skipped.
+    A new row is created with status='fetched'.
     """
     content_hash = hashlib.blake2b(text.encode(), digest_size=16).digest()
 
@@ -71,7 +71,7 @@ def set_status(doc_id: str, status: str) -> None:
 
 
 def get_status(doc_id: str) -> dict | None:
-    """Возвращает {id, status, title, source_url} или None если не найден."""
+    """Returns {id, status, title, source_url}, or None if not found."""
     with get_db_sync() as db:
         c = db.query(Content).filter(Content.id == doc_id).first()
         if c is None:
@@ -118,7 +118,7 @@ def count_chunks(doc_id: str) -> int:
 
 
 def existing_chunk_ids(chunk_ids: list[str]) -> set[str]:
-    """Какие из переданных id ещё живы в БД. Для поиска осиротевших точек Qdrant."""
+    """Which of the given ids are still alive in the DB. Used to find orphaned Qdrant points."""
     if not chunk_ids:
         return set()
     with get_db_sync() as db:
@@ -126,21 +126,21 @@ def existing_chunk_ids(chunk_ids: list[str]) -> set[str]:
         return {str(r[0]) for r in rows}
 
 
-# --- проекция статусов запроса (index.events -> request) ---------------------
+# --- request status projection (index.events -> request) ---------------------
 #
-# Живой поток статусов клиент получает по WS напрямую из Kafka. Эта таблица нужна
-# только для снапшота: клиент подключается ПОСЛЕ того, как fetch уже отработал
-# (или после рестарта API, или на другую реплику) и всё равно должен увидеть
-# doc_id и текущий статус. Выборку «дай события этого request_id» Kafka не умеет.
+# The client receives the live status stream over WS straight from Kafka. This table
+# is only needed for the snapshot: the client connects AFTER fetch has already run
+# (or after an API restart, or to another replica) and must still see the doc_id and
+# the current status. Kafka cannot answer "give me the events of this request_id".
 
 HISTORY_MAX = 64
 
 
 async def create_request(request_id: uuid.UUID, url: str) -> None:
-    """Ставит запрос в pending сразу при submit — до первого события из Kafka.
+    """Puts the request into pending right at submit time - before the first Kafka event.
 
-    Без этого WS, открытый мгновенно после POST /index, снапшота не получил бы
-    (строки ещё нет) и висел бы молча до первого события.
+    Without this, a WS opened immediately after POST /index would get no snapshot (the
+    row does not exist yet) and would hang silently until the first event.
     """
     async with SessionLocal() as db, db.begin():
         if await db.get(Request, request_id) is not None:
@@ -151,12 +151,12 @@ async def create_request(request_id: uuid.UUID, url: str) -> None:
 
 
 async def record_status_event(view: dict) -> None:
-    """Применяет одно плоское событие (kafka_service.events.status_view) к строке.
+    """Applies one flat event (kafka_service.events.status_view) to the row.
 
-    Идемпотентна: повтор того же event_id ничего не меняет — at-least-once в
-    Kafka гарантирует повторы. Строка берётся FOR UPDATE, потому что два инстанса
-    проектора могут владеть разными партициями index.events и писать в одну
-    строку (падение fetch летит с ключом url, остальное — с ключом doc_id).
+    Idempotent: repeating the same event_id changes nothing - Kafka's at-least-once
+    delivery guarantees repeats. The row is taken FOR UPDATE because two projector
+    instances may own different partitions of index.events and write to the same row
+    (a fetch failure is keyed by url, everything else by doc_id).
     """
     request_id = uuid.UUID(view["request_id"])
     entry = {
@@ -179,7 +179,7 @@ async def record_status_event(view: dict) -> None:
         if any(e.get("event_id") == entry["event_id"] for e in row.history):
             return
 
-        # Присваиваем новый список: mutable-трекинг JSONB SQLAlchemy сам не делает.
+        # Assign a new list: SQLAlchemy does not track JSONB mutations on its own.
         row.history = (row.history + [entry])[-HISTORY_MAX:]
         if view["doc_id"]:
             row.content_id = uuid.UUID(view["doc_id"])
@@ -194,10 +194,10 @@ async def record_status_event(view: dict) -> None:
 
 
 async def load_request_snapshot(request_id: uuid.UUID) -> dict:
-    """Снапшот для только что открытого WS.
+    """Snapshot for a freshly opened WS.
 
-    Строки нет — отдаём status=unknown, а не 404: события могут прийти позже,
-    соединение имеет смысл держать.
+    If the row is missing we return status=unknown rather than a 404: events may still
+    arrive later, so it is worth keeping the connection.
     """
     async with SessionLocal() as db:
         row = await db.get(Request, request_id)
@@ -225,7 +225,7 @@ async def load_request_snapshot(request_id: uuid.UUID) -> dict:
 
 
 async def load_content_status(doc_id: uuid.UUID) -> dict | None:
-    """Async-вариант get_status — для HTTP-ручки статуса по doc_id."""
+    """Async counterpart of get_status - for the HTTP status endpoint by doc_id."""
     async with SessionLocal() as db:
         c = (
             await db.execute(select(Content).where(Content.id == doc_id))

@@ -1,8 +1,8 @@
-"""Стадии пайплайна индексации: fetch -> chunk -> embed.
+"""Stages of the indexing pipeline: fetch -> chunk -> embed.
 
-Каждая стадия — чистая функция «payload на входе, список сообщений на выходе».
-Kafka-механику (коммиты, ретраи, DLQ) знает только worker.py, стадии её не видят —
-их можно вызывать напрямую в тестах.
+Each stage is a pure function: payload in, list of messages out. The Kafka mechanics
+(commits, retries, DLQ) are known only to worker.py; the stages never see them, so
+they can be called directly in tests.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ CHUNK_OVERLAP = 200
 
 @dataclass(frozen=True)
 class Emit:
-    """Сообщение, которое стадия просит отправить дальше."""
+    """A message the stage asks to be sent onward."""
 
     topic: str
     payload: BaseModel
@@ -122,8 +122,8 @@ def handle_index_request(payload: IndexRequest, env: Envelope) -> list[Emit]:
                 force=payload.force,
             ),
             type="content.fetched",
-            # Ключ = doc_id: все сообщения одного документа ложатся в одну партицию,
-            # значит стадии обрабатывают его строго по порядку и без гонок.
+            # Key = doc_id: all messages of one document land in the same partition,
+            # so the stages process it strictly in order and without races.
             key=doc_id,
         ),
         _status_emit("fetch", ContentStatus.FETCHED, doc_id, payload.url),
@@ -153,9 +153,9 @@ def handle_content_fetched(payload: ContentFetched, env: Envelope) -> list[Emit]
             _status_emit("chunk", "skipped", payload.doc_id, payload.url),
         ]
 
-    # Чанки уже есть — повторная доставка или force. Текст тот же (дедуп по
-    # content_hash), поэтому переразбивать нечего, а save_chunks второй раз
-    # упал бы на uq_chunks_content_index. Просто пропускаем документ дальше.
+    # Chunks already exist - a redelivery or force. The text is the same (dedup by
+    # content_hash), so there is nothing to re-split, and a second save_chunks would
+    # fail on uq_chunks_content_index. Just pass the document along.
     existing = count_chunks(payload.doc_id)
     if existing:
         log.info("chunk reused doc_id=%s chunks=%d", payload.doc_id, existing)
@@ -215,9 +215,10 @@ def handle_chunks_ready(payload: ChunksReady, env: Envelope) -> list[Emit]:
             _status_emit("embed", "skipped", payload.doc_id),
         ]
 
-    # Qdrant upsert идёт по id чанка, поэтому повтор стадии перезаписывает точки,
-    # а не дублирует их. force дополнительно сносит старые точки документа —
-    # нужно, если чанков стало меньше и «хвост» иначе остался бы в коллекции.
+    # A Qdrant upsert is keyed by chunk id, so repeating the stage overwrites the
+    # points instead of duplicating them. force additionally wipes the document's old
+    # points - needed when the chunk count shrank and the tail would otherwise stay in
+    # the collection.
     vectors = (
         reindex_document(payload.doc_id, collection)
         if payload.force
@@ -262,7 +263,7 @@ STAGES: dict[str, Stage] = {
         group_id=GROUP_EMBED,
         payload_model=ChunksReady,
         handler=handle_chunks_ready,
-        # Ретраить эмбеддинг дорого: одна попытка, дальше DLQ и разбор руками.
+        # Retrying an embedding is expensive: one attempt, then the DLQ and manual triage.
         max_attempts=1,
         consumer_overrides={"max.poll.interval.ms": EMBED_MAX_POLL_INTERVAL_MS},
     ),

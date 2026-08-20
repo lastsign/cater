@@ -1,4 +1,4 @@
-"""Создание топиков. Автосоздание в брокере выключено — топология задаётся явно."""
+"""Topic creation. Broker auto-creation is off - the topology is declared explicitly."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def ensure_topics(topics: tuple[str, ...] = ALL_TOPICS) -> None:
             num_partitions=TOPIC_PARTITIONS,
             replication_factor=TOPIC_REPLICATION,
             config={
-                # DLQ храним дольше: разбор падений обычно не в тот же день.
+                # The DLQ is kept longer: failures are usually triaged on another day.
                 "retention.ms": str(
                     TOPIC_RETENTION_MS * (4 if name == TOPIC_DLQ else 1)
                 ),

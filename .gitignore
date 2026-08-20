@@ -12,9 +12,9 @@ venv/
 *.har
 .claude
 
-# Игровые ассеты (картинки/анимации) — всегда доступны по CDN, бэку хранить не нужно.
-# Исключение: boss_combo_rewards_v7.json — игровой конфиг комбо/наград (нужен логике).
-# Чтобы оставить вложенный файл, git требует разнегатить все его родительские каталоги.
+# Game assets (images/animations) - always available from the CDN, the backend need not store them.
+# Exception: boss_combo_rewards_v7.json - game config for combos/rewards (needed by the logic).
+# To keep a nested file, git requires un-ignoring all of its parent directories.
 assets/**
 !assets/prison/
 !assets/prison/PrisonV3/

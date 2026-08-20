@@ -14,17 +14,18 @@ if TYPE_CHECKING:
 
 
 class Request(UUIDMixin, TimestampMixin, Base):
-    """Проекция index.events: «где сейчас запрос» + его таймлайн.
+    """Projection of index.events: where the request stands now, plus its timeline.
 
-    id — это request_id из Envelope, то есть то, что клиент получил в ответе на
-    POST /index и по чему подписывается на WS. Строка нужна ровно для одного:
-    отдать снапшот тому, кто подключился позже события (или после рестарта API,
-    или на другую реплику) — Kafka-топик статусов такой выборки по ключу не даёт.
+    id is the request_id from the Envelope, i.e. what the client received in the reply
+    to POST /index and what it subscribes with over WS. The row exists for exactly one
+    purpose: to serve a snapshot to whoever connected after the event (or after an API
+    restart, or to another replica) - the Kafka status topic offers no such lookup by
+    key.
     """
 
     __tablename__ = "request"
 
-    # Появляется только после fetch: до него документа в БД ещё нет.
+    # Appears only after fetch: before that the document is not in the DB yet.
     content_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("content.id", ondelete="SET NULL"),
@@ -34,10 +35,10 @@ class Request(UUIDMixin, TimestampMixin, Base):
     stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Оффсет последнего применённого события index.events — для отладки лага.
+    # Offset of the last applied index.events event - for debugging lag.
     last_seq: Mapped[int] = mapped_column(BigInteger, nullable=False, default=-1)
-    # Таймлайн [{event_id, stage, status, at, detail}] — по нему WS отдаёт историю
-    # и дедупит live-события (по event_id).
+    # Timeline [{event_id, stage, status, at, detail}] - the WS serves history from it
+    # and deduplicates live events (by event_id).
     history: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 
     content: Mapped[Content | None] = relationship("Content", lazy="raise")

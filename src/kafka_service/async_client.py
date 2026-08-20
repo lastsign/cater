@@ -1,7 +1,8 @@
-"""Async-сторона Kafka (aiokafka) — для FastAPI: приём запросов и раздача статусов.
+"""Async side of Kafka (aiokafka) - for FastAPI: accepting requests and serving statuses.
 
-Воркеры стадий на confluent-kafka (sync), здесь только API-процесс:
-producer публикует index.requests, consumer читает index.events и пушит в WS.
+The stage workers run on confluent-kafka (sync); this module is only for the API
+process: the producer publishes index.requests, the consumer reads index.events and
+pushes them into the WS.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ log = logging.getLogger(__name__)
 
 
 class AsyncProducer:
-    """Один продюсер на процесс. start/stop вешаются на lifespan FastAPI."""
+    """One producer per process. start/stop are hooked onto the FastAPI lifespan."""
 
     def __init__(self, **overrides):
         self._kwargs = {
@@ -56,8 +57,9 @@ class AsyncProducer:
     ) -> None:
         if self._producer is None:
             raise RuntimeError("AsyncProducer is not started")
-        # send_and_wait ждёт подтверждения от брокера: HTTP-ответ отдаём только
-        # когда запрос реально принят, иначе клиент получит task_id в никуда.
+        # send_and_wait waits for the broker's acknowledgement: we return an HTTP
+        # response only once the request is really accepted, otherwise the client gets
+        # a task_id pointing at nothing.
         await self._producer.send_and_wait(
             topic,
             value=envelope.to_bytes(),
@@ -75,7 +77,7 @@ class AsyncProducer:
         force: bool = False,
         request_id: uuid.UUID | None = None,
     ) -> uuid.UUID:
-        """Публикует запрос на индексацию, возвращает request_id для отслеживания."""
+        """Publishes an indexing request and returns the request_id for tracking."""
         envelope = Envelope(
             request_id=request_id or uuid.uuid4(),
             type="index.requested",
@@ -83,7 +85,7 @@ class AsyncProducer:
                 url=url, collection=collection or DEFAULT_COLLECTION, force=force
             ),
         )
-        # Ключ = url: повторные запросы одного url идут в одну партицию по порядку.
+        # Key = url: repeated requests for the same url go to one partition, in order.
         await self.send(TOPIC_INDEX_REQUESTS, envelope, key=url)
         return envelope.request_id
 
@@ -95,14 +97,15 @@ async def iter_events(
     group_id: str | None = None,
     topics: tuple[str, ...] = (TOPIC_INDEX_EVENTS,),
 ) -> AsyncIterator[dict]:
-    """Читает статусные события в плоском виде (kafka_service.events.status_view).
+    """Reads status events in flat form (kafka_service.events.status_view).
 
-    group_id=None — уникальная группа на процесс. Для WS-раздачи нужна именно
-    она: каждый API-инстанс должен получить все события, а не свою долю партиций
-    (свою долю берёт проектор, у него группа общая).
+    group_id=None means a unique group per process. That is exactly what WS fan-out
+    needs: every API instance must receive all events, not its share of partitions
+    (the projector is the one taking a share, its group is shared).
 
-    latest: догонять историю тут нечего — WS отдаёт прошлое из снапшота, а не
-    из топика, иначе каждый рестарт API прокручивал бы всю ленту статусов.
+    latest: there is no history to catch up on here - the WS serves the past from the
+    snapshot rather than from the topic, otherwise every API restart would replay the
+    entire status feed.
     """
     consumer = AIOKafkaConsumer(
         *topics,
@@ -126,11 +129,11 @@ async def run_event_pump(
     stop: asyncio.Event,
     publish: Callable[[uuid.UUID, dict], Awaitable[None]],
 ) -> None:
-    """Мост Kafka -> WS: льёт index.events в переданный publish (realtime.dispatcher).
+    """Kafka -> WS bridge: pours index.events into the given publish (realtime.dispatcher).
 
-    Живёт в lifespan FastAPI; при обрыве переподключается. publish обязан не
-    блокироваться на клиенте — иначе один медленный WS собирает лаг на всей
-    группе (см. realtime.dispatcher.Subscription.offer).
+    Lives in the FastAPI lifespan; reconnects when the connection drops. publish must
+    not block on a client - otherwise one slow WS builds up lag for the whole group
+    (see realtime.dispatcher.Subscription.offer).
     """
     while not stop.is_set():
         try:

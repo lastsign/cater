@@ -1,26 +1,26 @@
-# Celery RAG-пайплайн — заметки и план
+# Celery RAG pipeline — notes and plan
 
-Документ описывает текущее состояние `src/`, что сломано, что нужно дописать,
-и подводные камни архитектуры fetch → chunk → embed → upsert в Qdrant.
+This document describes the current state of `src/`, what is broken, what still has to be
+written, and the pitfalls of the fetch → chunk → embed → upsert-into-Qdrant architecture.
 
-Читать сверху вниз. Раздел «Подводные камни» — справочный, к нему возвращаться
-по мере роста нагрузки.
+Read it top to bottom. The "Pitfalls" section is a reference — come back to it as the load
+grows.
 
 ---
 
-## 0. TL;DR порядок запуска (когда всё доделаем)
+## 0. TL;DR startup order (once everything is finished)
 
-Из корня репо `/home/ptycho/cater`:
+From the repo root `/home/ptycho/cater`:
 
 ```bash
-# 1. Инфра
+# 1. Infrastructure
 docker compose -f src/docker-compose.yml up -d
-# (когда добавим Qdrant — он тоже сюда)
+# (once we add Qdrant — it goes here too)
 
-# 2. Применить миграции / создать таблицы
-python -m src.scripts.create_tables   # потом заменим на alembic
+# 2. Apply migrations / create the tables
+python -m src.scripts.create_tables   # to be replaced by alembic later
 
-# 3. Celery worker (минимум 3 очереди)
+# 3. Celery workers (at least 3 queues)
 celery -A src.celery_service.tasks worker -Q io -c 20 --pool=gevent --loglevel=info
 celery -A src.celery_service.tasks worker -Q embed -c 4 --loglevel=info
 celery -A src.celery_service.tasks worker -Q qdrant -c 2 --loglevel=info
@@ -31,96 +31,96 @@ uvicorn src.main:app --reload
 
 ---
 
-## 1. Что уже есть в `src/` (аудит)
+## 1. What already exists in `src/` (audit)
 
-### Работает / норм:
-- `db.py` — async SQLAlchemy engine + `SessionLocal` + `get_db()` для FastAPI. Ок.
-- `db_sync.py` — sync engine на `psycopg`. **Нужен именно для Celery-задач** (внутри тасков не используем async-сессию — см. подводный камень №8).
-- `models/base.py` — `Base`, `UUIDMixin`, `TimestampMixin`. Ок.
-- `models/content.py` — `Content` + `ContentText` (тело отдельной таблицей — хорошо для хранения больших текстов отдельно от метаданных).
-- `models/chunk.py` — `Chunk` с `content_id`, `chunk_index`, `text`, `text_hash`, `token_count`. Уникальность `(content_id, chunk_index)`. Хорошо.
-- `docker-compose.yml` — Redis + Postgres, `POSTGRES_*` починили. Ок.
-- `celery_service/celery_conn.py` — `app` с brokerом/backendом на Redis. Ок.
-- `celery_service/producer.py` — отдельный продюсер, side-effect убран из `tasks.py`. Ок.
+### Works / fine:
+- `db.py` — async SQLAlchemy engine + `SessionLocal` + `get_db()` for FastAPI. OK.
+- `db_sync.py` — sync engine on `psycopg`. **Required specifically for Celery tasks** (we do not use an async session inside tasks — see pitfall #8).
+- `models/base.py` — `Base`, `UUIDMixin`, `TimestampMixin`. OK.
+- `models/content.py` — `Content` + `ContentText` (the body in its own table — good for keeping large texts apart from metadata).
+- `models/chunk.py` — `Chunk` with `content_id`, `chunk_index`, `text`, `text_hash`, `token_count`. Uniqueness on `(content_id, chunk_index)`. Good.
+- `docker-compose.yml` — Redis + Postgres, `POSTGRES_*` fixed. OK.
+- `celery_service/celery_conn.py` — `app` with the broker/backend on Redis. OK.
+- `celery_service/producer.py` — a separate producer, the side effect is out of `tasks.py`. OK.
 
-### Заглушки (пустые файлы):
-- `storage.py` — 0 строк.
-- `utils.py` — 0 строк.
+### Stubs (empty files):
+- `storage.py` — 0 lines.
+- `utils.py` — 0 lines.
 
-### Не создано вообще:
-- `embeddings.py` — функция `embed(text)` / `embed_many(texts)`.
-- `qdrant_client.py` — клиент Qdrant + создание коллекции.
-- `scripts/create_tables.py` — bootstrap БД (или alembic).
-- Qdrant в `docker-compose.yml`.
-- Поле для хранения вектора в `Chunk` (или вектор живёт только в Qdrant — см. ниже).
+### Not created at all:
+- `embeddings.py` — an `embed(text)` / `embed_many(texts)` function.
+- `qdrant_client.py` — the Qdrant client + collection creation.
+- `scripts/create_tables.py` — DB bootstrap (or alembic).
+- Qdrant in `docker-compose.yml`.
+- A field to store the vector in `Chunk` (or the vector lives only in Qdrant — see below).
 
-### Сломано прямо сейчас (`celery_service/tasks.py`):
+### Broken right now (`celery_service/tasks.py`):
 
-| Строка | Проблема | Фикс |
+| Line | Problem | Fix |
 |---|---|---|
 | 14 | `uuid.uuid()` | `uuid.uuid4()` |
-| 19 | `@app.tast` — опечатка | `@app.task` |
-| 36 | `chunk.page_content` — выражение в пустоту | `text = chunk.page_content` |
-| 38 | `save_chunk(cid, c)` — нет переменной `c` | `save_chunk(cid, text)` |
-| 50 | `save_vector(...)` — не импортирована | Либо импортировать, либо вообще не сохранять в Postgres, а тащить вектор дальше как payload (см. п. 3 «архитектурное решение про хранение векторов») |
-| 56 | `load_vectors` — не импортирована | Реализовать в `storage.py` или отказаться от схемы (см. ниже) |
-| 59 | опечатка `paylaod` | `payload` |
-| 71 | `raise self.replace(workflow)` | `self.replace()` сам бросает исключение, `raise` не нужен. Просто `return self.replace(workflow)` или `self.replace(workflow)` без `raise`. |
-| 74 | `async def index_url_pipeline` | Не должно быть `async`. `.apply_async()` — это не coroutine, это просто метод celery, который синхронно возвращает `AsyncResult`. |
-| 78 | `dispatch_embeddings(collection)` — вызов вместо signature | `dispatch_embeddings.s(collection)` |
-| — | Нет очередей у задач | Добавить `queue=...` (см. подводный камень №4) |
+| 19 | `@app.tast` — typo | `@app.task` |
+| 36 | `chunk.page_content` — an expression going nowhere | `text = chunk.page_content` |
+| 38 | `save_chunk(cid, c)` — there is no variable `c` | `save_chunk(cid, text)` |
+| 50 | `save_vector(...)` — not imported | Either import it, or do not store in Postgres at all and carry the vector onward as a payload (see §3, "the architectural decision about storing vectors") |
+| 56 | `load_vectors` — not imported | Implement it in `storage.py` or drop the scheme (see below) |
+| 59 | typo `paylaod` | `payload` |
+| 71 | `raise self.replace(workflow)` | `self.replace()` raises on its own, no `raise` needed. Just `return self.replace(workflow)` or `self.replace(workflow)` without `raise`. |
+| 74 | `async def index_url_pipeline` | Must not be `async`. `.apply_async()` is not a coroutine, it is just a celery method that synchronously returns an `AsyncResult`. |
+| 78 | `dispatch_embeddings(collection)` — a call instead of a signature | `dispatch_embeddings.s(collection)` |
+| — | The tasks have no queues | Add `queue=...` (see pitfall #4) |
 
-### Сломано в `main.py`:
-- Строки 28, 33: используются `index_url_pipeline`, `AsyncResult`, `celery_app` — ничего не импортировано.
-- Строка 28: `await index_url_pipeline(...)` — функция не должна быть async, и `await` тут не нужен.
+### Broken in `main.py`:
+- Lines 28, 33: `index_url_pipeline`, `AsyncResult`, `celery_app` are used — nothing is imported.
+- Line 28: `await index_url_pipeline(...)` — the function must not be async, and `await` is not needed here.
 
-### Сломано в `conn.py`:
-- Файл выполняет `r.set / r.get` на верхнем уровне при импорте. Это тестовый скрипт, не модуль. Либо обернуть в `if __name__ == "__main__":`, либо удалить — у тебя уже есть Redis через Celery, отдельный коннект пока не нужен.
+### Broken in `conn.py`:
+- The file runs `r.set / r.get` at module level on import. That is a test script, not a module. Either wrap it in `if __name__ == "__main__":` or delete it — you already have Redis through Celery, a separate connection is not needed for now.
 
 ---
 
-## 2. Архитектура пайплайна (целевая)
+## 2. Pipeline architecture (target)
 
 ```
 POST /index {url}
        │
        ▼
    fetch_url(url)
-       │  возвращает: content_id (UUID Content-записи)
+       │  returns: content_id (UUID of the Content row)
        ▼
    split_into_chunks(content_id)
-       │  возвращает: [chunk_id_1, chunk_id_2, ...]
+       │  returns: [chunk_id_1, chunk_id_2, ...]
        ▼
-   dispatch_embeddings(chunk_ids)        ← задача-диспетчер
+   dispatch_embeddings(chunk_ids)        ← dispatcher task
        │
        │  self.replace(chord(...))
        ▼
    ┌─ embed_batch([cid, ...])  ┐
-   ├─ embed_batch([cid, ...])  ├─ group (параллельно)
+   ├─ embed_batch([cid, ...])  ├─ group (in parallel)
    └─ embed_batch([cid, ...])  ┘
        │
-       │  результаты собираются → callback chord
+       │  results are collected → chord callback
        ▼
    upsert_to_qdrant(list[list[dict]])
        │
        ▼
-   обновить Content.status = "indexed"
+   update Content.status = "indexed"
 ```
 
-Что лежит где:
-- **Postgres**: метаданные (`Content`), полный текст (`ContentText`), чанки (`Chunk` — id, text, text_hash). Источник правды.
-- **Qdrant**: только векторы + payload с `chunk_id` и опционально кусок текста (для быстрого превью при поиске).
-- **Redis (Celery broker)**: только сообщения «выполни задачу X с аргументом chunk_id=Y». **Никакого текста и векторов через broker**.
+What lives where:
+- **Postgres**: metadata (`Content`), the full text (`ContentText`), the chunks (`Chunk` — id, text, text_hash). The source of truth.
+- **Qdrant**: only vectors + a payload with `chunk_id` and optionally a piece of the text (for a fast preview in search).
+- **Redis (Celery broker)**: only messages saying "run task X with argument chunk_id=Y". **No texts and no vectors through the broker**.
 
-Это и есть «не таскай большие данные через broker» (подводный камень №1) на практике.
+That is "do not drag big data through the broker" (pitfall #1) put into practice.
 
 ---
 
-## 3. Что нужно создать / дописать
+## 3. What has to be created / written
 
 ### 3.1 `src/storage.py`
 
-Тонкая обёртка над Postgres для задач. Sync-сессии (для Celery), не async.
+A thin wrapper over Postgres for the tasks. Sync sessions (for Celery), not async.
 
 ```python
 from sqlalchemy import select
@@ -160,7 +160,7 @@ def save_chunks_bulk(content_id: str, chunks: list[tuple[int, str, bytes]]) -> l
         return [str(o.id) for o in objs]
 
 def load_chunks(chunk_ids: list[str]) -> list[tuple[str, str]]:
-    """-> [(chunk_id, text), ...] в том же порядке, что и chunk_ids."""
+    """-> [(chunk_id, text), ...] in the same order as chunk_ids."""
     with SessionLocalSync() as s:
         rows = s.execute(
             select(Chunk.id, Chunk.text).where(Chunk.id.in_(chunk_ids))
@@ -169,10 +169,10 @@ def load_chunks(chunk_ids: list[str]) -> list[tuple[str, str]]:
         return [(cid, by_id[cid]) for cid in chunk_ids]
 ```
 
-Принципы:
-- **Bulk-вставка** чанков одной транзакцией — иначе на длинных документах будет N round-trip к БД.
-- `with session.begin()` — единая транзакция, авто-commit на выходе.
-- Возвращаем строки (UUID → str), потому что Celery сериализует аргументы в JSON.
+Principles:
+- **Bulk insert** the chunks in a single transaction — otherwise long documents mean N round-trips to the DB.
+- `with session.begin()` — one transaction, auto-commit on exit.
+- Return strings (UUID → str), because Celery serializes arguments into JSON.
 
 ### 3.2 `src/embeddings.py`
 
@@ -189,7 +189,7 @@ def embed_many(texts: list[str]) -> list[list[float]]:
     return [d.embedding for d in resp.data]
 ```
 
-Батч-запрос — один HTTP round-trip на N чанков. Используется в `embed_batch`-задаче.
+A batch request is one HTTP round-trip per N chunks. Used in the `embed_batch` task.
 
 ### 3.3 `src/qdrant_client.py`
 
@@ -211,7 +211,7 @@ def ensure_collection(name: str, dim: int) -> None:
         )
 ```
 
-### 3.4 `docker-compose.yml` — добавить Qdrant
+### 3.4 `docker-compose.yml` — add Qdrant
 
 ```yaml
   qdrant:
@@ -234,7 +234,7 @@ volumes:
 ```python
 from src.db_sync import engine_sync
 from src.models.base import Base
-import src.models.content  # noqa: F401 — нужно, чтобы модели зарегистрировались
+import src.models.content  # noqa: F401 — needed so the models get registered
 import src.models.chunk    # noqa: F401
 
 if __name__ == "__main__":
@@ -242,9 +242,9 @@ if __name__ == "__main__":
     print("tables created")
 ```
 
-(Потом заменим на alembic — пока bootstrap.)
+(To be replaced by alembic later — this is just a bootstrap.)
 
-### 3.6 Переписать `celery_service/tasks.py` (целевая версия)
+### 3.6 Rewrite `celery_service/tasks.py` (target version)
 
 ```python
 import hashlib
@@ -319,7 +319,7 @@ def dispatch_embeddings(self, chunk_ids: list[str], collection: str = COLLECTION
         group(embed_batch.s(list(b)) for b in _chunked(chunk_ids, EMBED_BATCH_SIZE)),
         upsert_to_qdrant.s(collection),
     )
-    return self.replace(workflow)   # без raise
+    return self.replace(workflow)   # without raise
 
 
 def index_url_pipeline(url: str, collection: str = COLLECTION):
@@ -330,7 +330,7 @@ def index_url_pipeline(url: str, collection: str = COLLECTION):
     ).apply_async()
 ```
 
-### 3.7 Поправить `main.py`
+### 3.7 Fix `main.py`
 
 ```python
 from fastapi import FastAPI
@@ -354,141 +354,142 @@ def status(task_id: str):
     return {"state": "SUCCESS", "points_upserted": res.result}
 ```
 
-Обрати внимание: **обычные `def`, не `async def`**. Celery — синхронное API.
+Note: **plain `def`, not `async def`**. Celery has a synchronous API.
 
 ---
 
-## 4. Чек-лист «что доделать»
+## 4. "What is left to do" checklist
 
-- [ ] Починить опечатки в `tasks.py` (см. таблицу в §1).
-- [ ] Создать `storage.py` (см. §3.1).
-- [ ] Создать `embeddings.py` (см. §3.2). Положить `OPENAI_API_KEY` в `.env`.
-- [ ] Создать `qdrant_client.py` (см. §3.3).
-- [ ] Добавить Qdrant в `docker-compose.yml` (см. §3.4).
-- [ ] Создать `scripts/create_tables.py` (см. §3.5).
-- [ ] Переписать `tasks.py` целиком (§3.6).
-- [ ] Починить `main.py` (§3.7).
-- [ ] Очистить `conn.py` (либо удалить, либо обернуть в `__main__`).
-- [ ] Прогнать end-to-end: `POST /index` → `GET /index/{id}` → запрос в Qdrant.
-- [ ] Только после того как работает: ввести очереди (`-Q io / embed / qdrant`) и батчинг.
+- [ ] Fix the typos in `tasks.py` (see the table in §1).
+- [ ] Create `storage.py` (see §3.1).
+- [ ] Create `embeddings.py` (see §3.2). Put `OPENAI_API_KEY` into `.env`.
+- [ ] Create `qdrant_client.py` (see §3.3).
+- [ ] Add Qdrant to `docker-compose.yml` (see §3.4).
+- [ ] Create `scripts/create_tables.py` (see §3.5).
+- [ ] Rewrite `tasks.py` completely (§3.6).
+- [ ] Fix `main.py` (§3.7).
+- [ ] Clean up `conn.py` (either delete it or wrap it in `__main__`).
+- [ ] Run end-to-end: `POST /index` → `GET /index/{id}` → a query against Qdrant.
+- [ ] Only after that works: introduce the queues (`-Q io / embed / qdrant`) and batching.
 
-**Порядок важен**: сначала линейный пайплайн без оптимизаций, потом chord/батчинг/очереди. Не делай всё сразу — отлаживать невозможно.
+**Order matters**: first a linear pipeline without optimizations, then chord/batching/queues.
+Do not do it all at once — debugging becomes impossible.
 
 ---
 
-## 5. Подводные камни (расширенный справочник)
+## 5. Pitfalls (extended reference)
 
-### 5.1 Не таскай большие данные через broker
+### 5.1 Do not drag big data through the broker
 
-**Что не делать:** передавать в `.delay(...)` или возвращать из задачи: полные тексты страниц, PDF, массивы из тысяч чанков, embedding-векторы.
+**What not to do:** pass into `.delay(...)` or return from a task: full page texts, PDFs, arrays of thousands of chunks, embedding vectors.
 
-**Почему:** каждый аргумент задачи сериализуется в JSON и пишется в Redis как сообщение. Результат — пишется как ключ `celery-task-meta-<id>` с TTL 24 часа. Если возвращаешь 5000 векторов по 1536 float — это ~60 МБ в Redis на одну задачу. Redis станет ботлнеком быстрее, чем ты ожидаешь.
+**Why:** every task argument is serialized into JSON and written into Redis as a message. The result is written as the key `celery-task-meta-<id>` with a 24-hour TTL. Returning 5000 vectors of 1536 floats is ~60 MB in Redis for a single task. Redis becomes the bottleneck faster than you expect.
 
-**Что делать:** хранить тело в storage (Postgres/S3/диск), через broker гонять только `content_id` / `chunk_id`. В нашей архитектуре это уже учтено: чанки лежат в Postgres, через очередь летят только UUID.
+**What to do:** keep the body in storage (Postgres/S3/disk), push only `content_id` / `chunk_id` through the broker. Our architecture already accounts for this: the chunks live in Postgres, only UUIDs fly through the queue.
 
-### 5.2 Идемпотентность задач
+### 5.2 Task idempotency
 
-**Факт:** любая задача может выполниться **дважды**. Worker умирает после выполнения, но до отправки `ack` в broker — broker считает её невыполненной и отдаёт другому worker'у.
+**Fact:** any task may run **twice**. The worker dies after finishing the work but before sending the `ack` to the broker — the broker considers the task unfinished and hands it to another worker.
 
-**Что делать:**
-- Использовать детерминированные id (например, sha256 от контента чанка) — тогда повторный `qdrant.upsert` с тем же id перезапишет точку, а не создаст дубль.
-- Не делать сайд-эффекты без идемпотентного ключа (платежи, отправка email — только с dedup key).
-- В Postgres использовать `INSERT ... ON CONFLICT DO NOTHING / DO UPDATE`.
+**What to do:**
+- Use deterministic ids (for instance sha256 of the chunk content) — then a repeated `qdrant.upsert` with the same id overwrites the point instead of creating a duplicate.
+- Do not perform side effects without an idempotency key (payments, sending email — only with a dedup key).
+- In Postgres use `INSERT ... ON CONFLICT DO NOTHING / DO UPDATE`.
 
-### 5.3 `acks_late` и потеря задач
+### 5.3 `acks_late` and losing tasks
 
-**По умолчанию** Celery шлёт ack в broker **до** выполнения. Если worker упадёт посреди выполнения — задача потеряна.
+**By default** Celery sends the ack to the broker **before** execution. If the worker dies mid-execution, the task is lost.
 
-**Когда важно не потерять:**
+**When losing it is not acceptable:**
 ```python
 @app.task(acks_late=True, reject_on_worker_lost=True)
 def critical(...): ...
 ```
 
-Платишь за это повышенной вероятностью двойного выполнения (см. §5.2 — идемпотентность обязательна).
+You pay for it with a higher chance of double execution (see §5.2 — idempotency is mandatory).
 
-Для нашего пайплайна: `fetch_url` идемпотентен (можно перезапустить), `upsert_to_qdrant` тоже (Qdrant upsert по id). Безопасно включить `acks_late=True` глобально.
+For our pipeline: `fetch_url` is idempotent (it can be re-run), `upsert_to_qdrant` is too (a Qdrant upsert by id). It is safe to enable `acks_late=True` globally.
 
-### 5.4 Разные очереди для разных стадий
+### 5.4 Different queues for different stages
 
-**Проблема:** если всё в одной очереди, медленный `embed` (HTTP к OpenAI ~500мс) забьёт пул, и быстрые `fetch` будут стоять в очереди.
+**Problem:** with everything in one queue, a slow `embed` (an HTTP call to OpenAI, ~500 ms) fills the pool and the fast `fetch` tasks queue up behind it.
 
-**Решение:**
+**Solution:**
 ```python
-@app.task(queue="io")    # сеть, много параллельных
-@app.task(queue="embed") # ограничен API rate limit
-@app.task(queue="qdrant") # запись в векторную БД
+@app.task(queue="io")    # network, many in parallel
+@app.task(queue="embed") # limited by the API rate limit
+@app.task(queue="qdrant") # writes into the vector DB
 ```
 
-Запускать **разные worker-процессы на разные очереди**:
+Run **separate worker processes for separate queues**:
 ```bash
 celery -A ... worker -Q io     -c 50 --pool=gevent
 celery -A ... worker -Q embed  -c 4  --pool=prefork
 celery -A ... worker -Q qdrant -c 2  --pool=prefork
 ```
 
-`--pool=gevent` для IO-bound (сеть) — позволяет тысячу «потоков» на процесс.
-`--pool=prefork` (дефолт) для CPU-bound.
+`--pool=gevent` for IO-bound work (network) — it allows a thousand "threads" per process.
+`--pool=prefork` (the default) for CPU-bound work.
 
-### 5.5 `visibility_timeout` Redis broker
+### 5.5 `visibility_timeout` of the Redis broker
 
-**Дефолт — 1 час.** Если задача выполняется дольше → Redis-broker считает worker мёртвым и **отдаёт задачу другому worker'у**. Получаешь параллельное двойное выполнение без всякого падения.
+**The default is 1 hour.** If a task runs longer, the Redis broker considers the worker dead and **hands the task to another worker**. You get parallel double execution without any crash at all.
 
-Если ожидаешь длинные задачи (большой PDF, тяжёлый embedding) — поднять:
+If you expect long tasks (a big PDF, a heavy embedding) — raise it:
 ```python
-app.conf.broker_transport_options = {"visibility_timeout": 3600 * 12}  # 12 часов
+app.conf.broker_transport_options = {"visibility_timeout": 3600 * 12}  # 12 hours
 ```
 
-Альтернатива (лучше) — **дробить работу мельче**, чтобы ни одна задача не выполнялась дольше нескольких минут.
+The alternative (and the better one) is to **split the work more finely**, so that no single task runs longer than a few minutes.
 
-### 5.6 Размер chord-группы
+### 5.6 Chord group size
 
-Chord на Redis реализован через polling счётчика выполненных задач из группы. Для группы из 100 задач — норм. Для группы из 10 000 задач — Redis начинает страдать, callback может задерживаться или ломаться.
+A chord on Redis is implemented by polling a counter of finished tasks in the group. For a group of 100 tasks that is fine. For a group of 10,000 tasks Redis starts to suffer and the callback may be delayed or break.
 
-**В нашем пайплайне:** при `EMBED_BATCH_SIZE = 32` документ на 10 000 чанков даёт chord из ~313 задач — норм. Если будут документы по 100 000 чанков — батч поднимаем до 128 или дробим на под-пайплайны.
+**In our pipeline:** with `EMBED_BATCH_SIZE = 32` a document of 10,000 chunks produces a chord of ~313 tasks — fine. If documents of 100,000 chunks show up, raise the batch to 128 or split into sub-pipelines.
 
-### 5.7 Imports на верхнем уровне модуля задач
+### 5.7 Imports at the top level of the task module
 
-Помни: воркер при старте импортирует `tasks.py`. Всё, что на верхнем уровне модуля, выполнится. Поэтому:
-- ❌ `add.delay(4, 4)` на модуле (будет слать задачу при каждом старте воркера).
-- ❌ `qdrant.upsert(...)` на модуле.
-- ❌ Тяжёлые импорты типа `import torch` — лучше внутри задачи (`def`), чтобы не грузить при автодискавери.
+Remember: on startup the worker imports `tasks.py`. Everything at module level runs. Therefore:
+- ❌ `add.delay(4, 4)` at module level (it would send a task on every worker start).
+- ❌ `qdrant.upsert(...)` at module level.
+- ❌ Heavy imports such as `import torch` — better inside the task (`def`), so they are not loaded during autodiscovery.
 
-В нашем `tasks.py` (§3.6) `langchain_text_splitters` импортируется внутри задачи — именно поэтому.
+In our `tasks.py` (§3.6) `langchain_text_splitters` is imported inside the task for exactly this reason.
 
-### 5.8 Async и Celery несовместимы (важно для FastAPI-привычки)
+### 5.8 Async and Celery are incompatible (important with a FastAPI habit)
 
-Celery 5.x — **синхронный фреймворк**. Внутри задач нельзя использовать `AsyncSession` SQLAlchemy напрямую — придётся либо `asyncio.run(...)` (медленно, новый event loop на каждую задачу), либо держать sync-сессию параллельно. Именно поэтому в проекте есть **и `db.py` (async для FastAPI), и `db_sync.py` (sync для Celery)**.
+Celery 5.x is a **synchronous framework**. Inside tasks you cannot use SQLAlchemy's `AsyncSession` directly — you would need either `asyncio.run(...)` (slow, a new event loop per task) or a sync session kept alongside. That is exactly why the project has **both `db.py` (async for FastAPI) and `db_sync.py` (sync for Celery)**.
 
-В FastAPI-хендлерах при работе с Celery (`.delay`, `AsyncResult.ready()`) — используй **обычные `def`-хендлеры**. Async не даст никакого выигрыша (Celery API синхронное), и есть риск случайно заблокировать event loop.
+In FastAPI handlers that work with Celery (`.delay`, `AsyncResult.ready()`) use **plain `def` handlers**. Async gives no benefit at all (the Celery API is synchronous) and there is a risk of accidentally blocking the event loop.
 
-### 5.9 PENDING ≠ «задача существует»
+### 5.9 PENDING ≠ "the task exists"
 
-`AsyncResult(random_uuid).state` вернёт `PENDING`. Celery не знает, существует ли задача с таким id — он просто говорит «не вижу результата». Это значит, что polling по id, полученному с фронта, может вечно возвращать PENDING, если ты опечатался.
+`AsyncResult(random_uuid).state` returns `PENDING`. Celery does not know whether a task with that id exists — it simply says "I see no result". That means polling by an id received from the frontend can return PENDING forever if you made a typo.
 
-Чтобы различать «задача в очереди» vs «такой задачи нет»:
+To tell "the task is queued" from "there is no such task":
 ```python
-app.conf.task_track_started = True   # появится state STARTED
+app.conf.task_track_started = True   # a STARTED state appears
 ```
-И/или храни созданные task_id в собственной таблице (`Job` с `task_id`, `status`, `created_at`) — тогда есть источник правды.
+And/or keep the created task_ids in your own table (a `Job` with `task_id`, `status`, `created_at`) — then you have a source of truth.
 
 ### 5.10 Polling vs WebSocket/SSE
 
-`GET /index/{task_id}` каждые 2 секунды с фронта — работает, но шумно. Production-варианты:
-- **SSE** (Server-Sent Events) — простой однонаправленный поток событий от сервера.
-- **WebSocket** + Redis pub/sub: задача в конце делает `redis.publish("job:{id}", "done")`, FastAPI подписан и пушит клиенту.
-- Celery signal `task_postrun` — глобальный хук на завершение любой задачи.
+`GET /index/{task_id}` every 2 seconds from the frontend works, but it is noisy. Production options:
+- **SSE** (Server-Sent Events) — a simple one-way stream of events from the server.
+- **WebSocket** + Redis pub/sub: at the end the task does `redis.publish("job:{id}", "done")`, FastAPI is subscribed and pushes to the client.
+- The Celery signal `task_postrun` — a global hook on the completion of any task.
 
-Для прототипа polling нормален. Менять, когда станет узким местом.
+For a prototype polling is fine. Change it when it becomes the bottleneck.
 
 ---
 
-## 6. Дальнейшее (после того как пайплайн заработает)
+## 6. Next steps (once the pipeline works)
 
-- Alembic вместо `create_all`.
-- `Job`-таблица для отслеживания статуса индексации (см. §5.9).
-- Retry на embedding (`autoretry_for=(openai.RateLimitError,)`, `retry_backoff=True`).
-- Метрики: Prometheus-экспортер для Celery (`celery-exporter`), Flower для дебага.
-- Тесты задач без воркера: `task.apply(args=[...])` — синхронно выполняет в текущем процессе.
-- PDF: новый шаг `extract_text(file_id) → content_id` перед `split_into_chunks`. Файлы — в S3/MinIO (не в Postgres).
-- Поиск: отдельный endpoint `POST /search {query}` → embed query → `qdrant.search` → вернуть `chunk_id`-ы → подтянуть тексты из Postgres.
+- Alembic instead of `create_all`.
+- A `Job` table to track the indexing status (see §5.9).
+- Retries on embedding (`autoretry_for=(openai.RateLimitError,)`, `retry_backoff=True`).
+- Metrics: a Prometheus exporter for Celery (`celery-exporter`), Flower for debugging.
+- Testing tasks without a worker: `task.apply(args=[...])` runs them synchronously in the current process.
+- PDFs: a new step `extract_text(file_id) → content_id` before `split_into_chunks`. Files go to S3/MinIO (not into Postgres).
+- Search: a separate endpoint `POST /search {query}` → embed the query → `qdrant.search` → return the `chunk_id`s → pull the texts from Postgres.

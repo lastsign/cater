@@ -1,4 +1,4 @@
-"""Синхронные обёртки над confluent-kafka (librdkafka) — для стадийных воркеров."""
+"""Synchronous wrappers around confluent-kafka (librdkafka) - for the stage workers."""
 
 from __future__ import annotations
 
@@ -23,11 +23,11 @@ def _on_delivery(err, msg: Message) -> None:
 
 
 class SyncProducer:
-    """Тонкая обёртка: сериализация Envelope + poll для колбэков доставки.
+    """Thin wrapper: Envelope serialization plus a poll for delivery callbacks.
 
-    produce() у librdkafka асинхронный — сообщение уходит в локальную очередь.
-    Гарантия «записано в брокер» появляется только после flush(), поэтому
-    воркер всегда делает flush перед коммитом оффсета.
+    librdkafka's produce() is asynchronous - the message goes to a local queue. The
+    "written to the broker" guarantee only appears after flush(), which is why the
+    worker always flushes before committing an offset.
     """
 
     def __init__(self, **overrides):
@@ -44,11 +44,11 @@ class SyncProducer:
             ],
             on_delivery=_on_delivery,
         )
-        # Неблокирующий poll — вызывает накопившиеся delivery-колбэки.
+        # Non-blocking poll - fires the delivery callbacks that have piled up.
         self._producer.poll(0)
 
     def send_raw(self, topic: str, value: bytes, key: str | None = None) -> None:
-        """Отправка уже сериализованного тела — для DLQ-реплея, без пересборки Envelope."""
+        """Send an already serialized body - for DLQ replay, without rebuilding the Envelope."""
         self._producer.produce(
             topic,
             value=value,
@@ -58,7 +58,7 @@ class SyncProducer:
         self._producer.poll(0)
 
     def flush(self, timeout: float = FLUSH_TIMEOUT_S) -> int:
-        """Возвращает число НЕдоставленных сообщений. Не 0 — считаем отправку провалившейся."""
+        """Returns the number of UNdelivered messages. Non-zero means the send failed."""
         return self._producer.flush(timeout)
 
     def flush_or_raise(self, timeout: float = FLUSH_TIMEOUT_S) -> None:

@@ -1,12 +1,12 @@
-"""Проектор index.events -> таблица request.
+"""Projector of index.events -> the request table.
 
-Зачем отдельный консьюмер, а не запись из стадий: стадии остаются чистыми
-функциями над своим payload'ом и ничего не знают ни про request_id-снапшоты, ни
-про WS. Событие уже есть в Kafka — проекция это просто ещё один его читатель.
+Why a separate consumer instead of writing from the stages: the stages stay pure
+functions over their payload and know nothing about request_id snapshots or the WS.
+The event is already in Kafka - the projection is simply one more reader of it.
 
-Группа здесь ОБЩАЯ (`cater.events.projector`) — в отличие от WS-pump'а, который
-берёт уникальную группу на процесс. Проектору нужно, чтобы каждое событие
-обработал ровно один инстанс, а pump'у — чтобы каждый инстанс получил все.
+The group here is SHARED (`cater.events.projector`) - unlike the WS pump, which takes
+a unique group per process. The projector needs exactly one instance to handle each
+event, while the pump needs every instance to receive all of them.
 """
 
 from __future__ import annotations
@@ -30,11 +30,11 @@ log = logging.getLogger(__name__)
 async def run_status_projector(
     stop: asyncio.Event, group_id: str = GROUP_EVENTS_PROJECTOR
 ) -> None:
-    """Пишет статусы в Postgres. Живёт в lifespan FastAPI или отдельным процессом.
+    """Writes statuses to Postgres. Lives in the FastAPI lifespan or as its own process.
 
-    Порядок как у воркеров стадий: сначала запись в БД, потом коммит оффсета.
-    При падении между ними событие приедет снова — record_status_event
-    идемпотентна по event_id.
+    Same order as in the stage workers: write to the DB first, commit the offset
+    second. On a crash in between, the event arrives again - record_status_event is
+    idempotent by event_id.
     """
     from src.storage import record_status_event
 
@@ -44,8 +44,8 @@ async def run_status_projector(
             bootstrap_servers=BOOTSTRAP_SERVERS,
             client_id=f"{CLIENT_ID}-projector",
             group_id=group_id,
-            # earliest: пропущенные за простой статусы нужны — иначе в снапшоте
-            # навсегда останется дырка (например, тот самый doc_id из fetch).
+            # earliest: statuses missed during downtime are needed - otherwise the
+            # snapshot keeps a permanent hole (e.g. that very doc_id from fetch).
             auto_offset_reset="earliest",
             enable_auto_commit=False,
         )
@@ -57,7 +57,7 @@ async def run_status_projector(
                     break
                 view = parse_status_event(msg.value, msg.offset)
                 if view is None:
-                    await consumer.commit()  # битое тело ретраить бессмысленно
+                    await consumer.commit()  # retrying a broken body is pointless
                     continue
                 await record_status_event(view)
                 await consumer.commit()

@@ -1,16 +1,16 @@
-"""CDC-синк Postgres → Qdrant: убирает осиротевшие векторы.
+"""CDC sink Postgres -> Qdrant: removes orphaned vectors.
 
-Проблема: `Chunk.id` — это ровно id точки в Qdrant (см. `indexer._build_points`),
-но удаление строки чанка (в том числе каскадом от `Content`) ничего не знает про
-Qdrant. Точки остаются в коллекции навсегда и всплывают в поиске.
+The problem: `Chunk.id` is exactly the point id in Qdrant (see `indexer._build_points`),
+but deleting a chunk row (including via a cascade from `Content`) knows nothing about
+Qdrant. The points stay in the collection forever and surface in search results.
 
-Решение: Debezium читает WAL таблицы `public.chunks` и публикует события в
-`cater.public.chunks`; этот консьюмер берёт из delete-событий PK и удаляет
-соответствующие точки. Прикладной код при этом не меняется вообще — источник
-правды остаётся один (Postgres), а Qdrant догоняет его по журналу.
+The solution: Debezium reads the WAL of the `public.chunks` table and publishes events
+to `cater.public.chunks`; this consumer takes the PK out of delete events and removes
+the corresponding points. Application code does not change at all - there is still a
+single source of truth (Postgres) and Qdrant catches up with it through the log.
 
-CDC ловит только изменения с момента создания слота (`snapshot.mode=no_data`).
-Сироты, накопившиеся раньше, убираются разовым `sweep_orphans`.
+CDC only captures changes made after the slot was created (`snapshot.mode=no_data`).
+Orphans accumulated earlier are cleaned up by a one-off `sweep_orphans`.
 """
 
 from __future__ import annotations
@@ -57,10 +57,10 @@ def _target_collections() -> tuple[str, ...]:
 
 
 def _delete_points(point_ids: list[str]) -> None:
-    """Удаление по id идемпотентно: несуществующая точка — не ошибка, а no-op.
+    """Deleting by id is idempotent: a missing point is a no-op, not an error.
 
-    Именно это позволяет коммитить оффсет после удаления: повторная доставка
-    того же события просто ничего не найдёт.
+    That is precisely what allows committing the offset after the delete: a redelivery
+    of the same event simply finds nothing.
     """
     from qdrant_client.http import models
 
@@ -73,11 +73,12 @@ def _delete_points(point_ids: list[str]) -> None:
 
 
 def _delete_with_retries(point_ids: list[str], attempts: int = 3) -> None:
-    """Переживает моргание Qdrant, но не зависает: суммарная пауза ~3с.
+    """Survives a Qdrant blip without hanging: ~3s of pausing in total.
 
-    Дольше ретраить нельзя — консьюмер не опрашивает брокер и на длинной паузе
-    вылетит из группы по max.poll.interval.ms. Если Qdrant лежит всерьёз, лучше
-    упасть: оффсет не закоммичен, супервизор перезапустит, события переиграются.
+    Retrying longer is not allowed - the consumer is not polling the broker and a long
+    pause would drop it from the group via max.poll.interval.ms. If Qdrant is really
+    down it is better to crash: the offset is uncommitted, the supervisor restarts the
+    process and the events are replayed.
     """
     for attempt in range(1, attempts + 1):
         try:
@@ -86,29 +87,31 @@ def _delete_with_retries(point_ids: list[str], attempts: int = 3) -> None:
         except Exception as exc:
             if attempt == attempts:
                 raise
-            log.warning("cdc: удаление не прошло (%d/%d): %s", attempt, attempts, exc)
+            log.warning("cdc: delete failed (%d/%d): %s", attempt, attempts, exc)
             time.sleep(0.5 * 2 ** (attempt - 1))
 
 
 def _deleted_chunk_id(raw: bytes) -> str | None:
-    """id удалённой строки из Debezium-события (op=d), иначе None.
+    """The id of the deleted row from a Debezium event (op=d), otherwise None.
 
-    Формат — «развёрнутый» конверт (schemas.enable=false):
+    The format is the unwrapped envelope (schemas.enable=false):
     {"before": {...}, "after": null, "op": "d", "source": {...}}.
-    При REPLICA IDENTITY DEFAULT в `before` лежит только PK — нам этого хватает.
+    With REPLICA IDENTITY DEFAULT, `before` holds only the PK - which is enough for us.
     """
     try:
         event = json.loads(raw)
     except json.JSONDecodeError:
-        log.error("cdc: не разобрал событие: %s", raw[:200])
+        log.error("cdc: could not parse event: %s", raw[:200])
         return None
 
     op = event.get("op")
     if op == "d":
         return (event.get("before") or {}).get("id")
     if op == "t":
-        # TRUNCATE не даёт id строк — синхронизировать по нему нечего.
-        log.warning("cdc: TRUNCATE на chunks, точки в Qdrant остались — нужен sweep")
+        # TRUNCATE carries no row ids - there is nothing to synchronize from it.
+        log.warning(
+            "cdc: TRUNCATE on chunks, points stayed in Qdrant - a sweep is needed"
+        )
     return None
 
 
@@ -122,18 +125,18 @@ def run_cdc_sync(stop: threading.Event | None = None) -> None:
     deadline = time.monotonic() + CDC_LINGER_S
 
     def flush() -> None:
-        """Сначала удаляем в Qdrant, потом двигаем оффсет — иначе удаление теряется."""
+        """Delete in Qdrant first, move the offset second - otherwise the delete is lost."""
         nonlocal pending, last, deadline
         if pending:
             _delete_with_retries(pending)
-            log.info("cdc: удалено точек: %d", len(pending))
+            log.info("cdc: points deleted: %d", len(pending))
             pending = []
         if last is not None:
             consumer.commit(message=last, asynchronous=False)
             last = None
         deadline = time.monotonic() + CDC_LINGER_S
 
-    log.info("cdc: слушаю %s как группа %s", TOPIC_CDC_CHUNKS, GROUP_CDC_QDRANT)
+    log.info("cdc: listening on %s as group %s", TOPIC_CDC_CHUNKS, GROUP_CDC_QDRANT)
     try:
         while not stop.is_set():
             msg = consumer.poll(POLL_TIMEOUT_S)
@@ -143,12 +146,12 @@ def run_cdc_sync(stop: threading.Event | None = None) -> None:
                 continue
             if msg.error():
                 if msg.error().code() != KafkaError._PARTITION_EOF:
-                    log.error("cdc: ошибка консьюмера: %s", msg.error())
+                    log.error("cdc: consumer error: %s", msg.error())
                 continue
 
             last = msg
-            # value=None — tombstone, который Debezium шлёт следом за delete
-            # (для compaction). Работы в нём нет, но оффсет двигать надо.
+            # value=None is the tombstone Debezium sends right after a delete (for
+            # compaction). There is no work in it, but the offset must still advance.
             if msg.value():
                 chunk_id = _deleted_chunk_id(msg.value())
                 if chunk_id:
@@ -160,9 +163,9 @@ def run_cdc_sync(stop: threading.Event | None = None) -> None:
         try:
             flush()
         except Exception:
-            log.exception("cdc: финальный flush не прошёл, события переиграются")
+            log.exception("cdc: final flush failed, events will be replayed")
         consumer.close()
-        log.info("cdc: остановлен")
+        log.info("cdc: stopped")
 
 
 def sweep_orphans(
@@ -170,10 +173,10 @@ def sweep_orphans(
     batch: int = 1000,
     dry_run: bool = False,
 ) -> int:
-    """Разовая сверка коллекции с БД: удаляет точки, которых уже нет в `chunks`.
+    """One-off reconciliation of a collection with the DB: deletes points no longer in `chunks`.
 
-    Нужна для двух случаев: разгрести сирот, накопившихся до включения CDC, и
-    подстраховать пропуски (TRUNCATE, потерянный слот, переливка БД из дампа).
+    Needed for two cases: clearing out orphans accumulated before CDC was enabled, and
+    covering gaps (TRUNCATE, a lost slot, restoring the DB from a dump).
     """
     from qdrant_client.http import models
 
@@ -203,7 +206,7 @@ def sweep_orphans(
 
         if orphans:
             orphans_total += len(orphans)
-            log.info("sweep: сирот в пачке %d/%d", len(orphans), len(ids))
+            log.info("sweep: orphans in batch %d/%d", len(orphans), len(ids))
             if not dry_run:
                 qc.delete(
                     collection_name=collection,
@@ -215,9 +218,9 @@ def sweep_orphans(
             break
 
     log.info(
-        "sweep: просмотрено %d, сирот %d%s",
+        "sweep: scanned %d, orphans %d%s",
         scanned,
         orphans_total,
-        " (dry-run)" if dry_run else " — удалены",
+        " (dry-run)" if dry_run else " - deleted",
     )
     return orphans_total
