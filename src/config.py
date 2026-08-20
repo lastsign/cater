@@ -1,5 +1,6 @@
 import os
 
+
 class Settings:
     POSTGRES_DSN = os.getenv(
         "POSTGRES_DSN",

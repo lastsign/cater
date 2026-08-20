@@ -1,22 +1,33 @@
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Annotated
-from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
-from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
+
+from fastapi import Depends, FastAPI, WebSocket
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from src.db import get_db
+from src.kafka_service.async_client import producer, run_event_pump
+from src.kafka_service.projector import run_status_projector
 from src.models.content import Content
-from src.realtime.listener import run_listener
 from src.realtime.dispatcher import dispatcher
+from src.realtime.ws import stream_request
+from src.storage import create_request
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await producer.start()
     stop = asyncio.Event()
-    task = asyncio.create_task(run_listener(stop))
+    tasks = [
+        asyncio.create_task(run_event_pump(stop, dispatcher.publish)),
+        asyncio.create_task(run_status_projector(stop)),
+    ]
     yield
     stop.set()
-    task.cancel()
+    for t in tasks:
+        t.cancel()
+    await producer.stop()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -24,17 +35,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.websocket("/ws/requests/{request_id}")
 async def ws_request(ws: WebSocket, request_id: UUID):
-    await ws.accept()
-    await dispatcher.subscribe(request_id, ws)
-    try:
-        snapshot = await load_request_snapshot(request_id)
-        await ws.send_json(snapshot)
-        while True:
-            await ws.receive_text()
-    except WebSocketDisconnect:
-        pass
-    finally:
-        await dispatcher.unsubscribe(request_id, ws)
+    await stream_request(ws, request_id)
 
 
 class FixedContentQueryChecker:
@@ -56,15 +57,17 @@ async def read_query_check(fixed_content_included: Annotated[bool, Depends(check
 
 
 @app.post("/index")
-def index(url: str):
-    from src.celery_service.tasks import index_url_pipeline
-    async_result = index_url_pipeline(url)
-    return {"task_id": async_result.id}
+async def index(url: str):
+    request_id = await producer.submit_index_request(url=url)
+    await create_request(request_id, url)
+    return {"request_id": request_id}
+
 
 @app.get("/index/{task_id}")
 async def status(task_id: str, db: Annotated[AsyncSession, Depends(get_db)]):
-    from src.celery_service.celery_conn import app as celery_app
     from celery.result import AsyncResult
+
+    from src.celery_service.celery_conn import app as celery_app
 
     res = AsyncResult(task_id, app=celery_app)
 

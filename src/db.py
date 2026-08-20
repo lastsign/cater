@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import AsyncIterator
 from functools import partial
-from typing import AsyncIterator
 
 from pydantic_core import to_jsonable_python
 from sqlalchemy.engine import URL

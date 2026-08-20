@@ -10,16 +10,22 @@ services:
     restart: always
 
   postgres:
-    image: postgres:alpine
+    image: postgres:18-alpine
     ports:
       - "5432:5432"
-
     volumes:
-      - pg_data:/var/lib/postgresql/data
+      - pg_data:/var/lib/postgresql
     environment:
       - POSTGRES_DB=babufrik
       - POSTGRES_USER=babufrik
       - POSTGRES_PASSWORD=password
+    # wal_level=logical нужен Debezium: без него слот логической репликации
+    # не создать. Слоты и wal_senders — с запасом на второго потребителя.
+    command: >
+      postgres
+      -c wal_level=logical
+      -c max_replication_slots=10
+      -c max_wal_senders=10
     restart: always
 
   qdrant:
@@ -32,7 +38,62 @@ services:
       - qdrant_data:/qdrant/storage
     restart: always
 
+  # opensearch:
+  #   image: opensearchproject/opensearch:latest
+  #   container_name: opensearch_server
+  #   ports:
+  #   - "9200:9200"
+  #   - "9600:9600"
+  #   volumes:
+  #     - opensearch_data:/opensearch/storage
+  #   restart: always
+
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: kafka_server
+    ports:
+      - "9092:9092"
+    environment:
+      # KRaft: брокер и контроллер в одном узле, ZooKeeper не нужен.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,INTERNAL://:29092
+      # PLAINTEXT — для клиентов с хоста, INTERNAL — для контейнеров в этой сети.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Топики создаём явно: python -m src.kafka_service topics
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    restart: always
+
+  debezium:
+    image: quay.io/debezium/server:3.0.2.Final
+    container_name: debezium_server
+    depends_on:
+      - postgres
+      - kafka
+    volumes:
+      # Конфиг лежит в /debezium/config (не conf); монтируем одним файлом,
+      # иначе каталог перекроет config/lib и metrics.yml из образа.
+      - ./kafka_service/debezium/application.properties:/debezium/config/application.properties:ro
+      # Оффсеты слота переживают рестарт контейнера — иначе Debezium начнёт
+      # читать WAL с текущей позиции и удаления, случившиеся в простое, потеряются.
+      - debezium_data:/debezium/data
+    restart: always
+
 volumes:
   redis_data:
   pg_data:
   qdrant_data:
+  opensearch_data:
+  kafka_data:
+  debezium_data:

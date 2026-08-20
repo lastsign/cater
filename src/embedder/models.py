@@ -1,5 +1,5 @@
+from collections.abc import Iterable
 from functools import lru_cache
-from typing import Iterable
 
 from src.embedder.config import COLBERT_MODEL, DENSE_MODEL, SPARSE_MODEL, USE_GPU
 
@@ -38,7 +38,11 @@ def _preload_cuda_libs() -> None:
 if USE_GPU:
     _preload_cuda_libs()
 
-from fastembed import LateInteractionTextEmbedding, SparseTextEmbedding, TextEmbedding  # noqa: E402
+from fastembed import (
+    LateInteractionTextEmbedding,
+    SparseTextEmbedding,
+    TextEmbedding,
+)
 
 # Models that require "passage: " / "query: " input prefixes (E5 family).
 _E5_PREFIX_MODELS = {
@@ -90,4 +94,6 @@ def sparse_model() -> SparseTextEmbedding:
 
 @lru_cache(maxsize=1)
 def colbert_model() -> LateInteractionTextEmbedding:
-    return LateInteractionTextEmbedding(model_name=COLBERT_MODEL, providers=_providers())
+    return LateInteractionTextEmbedding(
+        model_name=COLBERT_MODEL, providers=_providers()
+    )

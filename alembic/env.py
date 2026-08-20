@@ -8,7 +8,6 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
-
 from src.db import build_async_url
 from src.models import Base
 
@@ -17,7 +16,9 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", build_async_url().render_as_string(hide_password=False))
+config.set_main_option(
+    "sqlalchemy.url", build_async_url().render_as_string(hide_password=False)
+)
 
 target_metadata = Base.metadata
 

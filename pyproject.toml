@@ -18,6 +18,7 @@ server = [
     "asyncpg>=0.31.0",
     "psycopg[binary]>=3.3.4",
     "alembic>=1.18.4",
+    "uvicorn>=0.48.0",
 ]
 
 worker = [
@@ -43,6 +44,15 @@ embedder = [
     "qdrant-client>=1.18.0"
 ]
 
+kafka = [
+    "confluent-kafka>=2.6.0",
+    "aiokafka[lz4]>=0.12.0",
+]
+dev = [
+    "pre-commit>=4.6.2",
+    "ruff>=0.16.2",
+]
+
 [tool.pyright]
 # --- what to check ---
 include = ["src", "scripts", "main.py"]
@@ -62,25 +72,25 @@ exclude = [
 # ============================================================
 [tool.ty.environment]
 python-version = "3.13"
-python = ".venv"          # путь к venv, откуда брать установленные пакеты
+python = ".venv"
 
 [tool.ty.src]
 include = ["src", "scripts", "main.py"]
 exclude = [
     "**/__pycache__",
     ".venv",
-    "alembic/versions",   # автогенерённые миграции
+    "alembic/versions",
     "data",
 ]
 
 [tool.ty.terminal]
 output-format = "full"    # full | concise
-# error-on-warning = true # включить, если в CI хотим падать и на warning'ах
+# error-on-warning = true
 
 [tool.ty.rules]
-# Значения: "error" | "warn" | "ignore". Имена правил — kebab-case.
+# Значения: "error" | "warn" | "ignore".
 unresolved-import = "error"
 possibly-missing-import = "warn"
 unused-ignore-comment = "warn"
-# Либы без stubs (qdrant/fastembed/nvidia/onnx) — не шумим на «неизвестных» типах:
+# for no stubs (qdrant/fastembed/nvidia/onnx)
 redundant-cast = "warn"

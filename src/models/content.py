@@ -23,12 +23,12 @@ class Content(UUIDMixin, TimestampMixin, Base):
     content_hash: Mapped[bytes | None] = mapped_column(nullable=True)
     meta: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    text: Mapped["ContentText | None"] = relationship(
+    text: Mapped[ContentText | None] = relationship(
         back_populates="content",
         uselist=False,
         cascade="all, delete-orphan",
     )
-    chunks: Mapped[list["Chunk"]] = relationship(
+    chunks: Mapped[list[Chunk]] = relationship(
         back_populates="content",
         cascade="all, delete-orphan",
     )
@@ -47,4 +47,4 @@ class ContentText(UUIDMixin, TimestampMixin, Base):
     )
     text: Mapped[str] = mapped_column(Text, nullable=False)
 
-    content: Mapped["Content"] = relationship(back_populates="text")
+    content: Mapped[Content] = relationship(back_populates="text")

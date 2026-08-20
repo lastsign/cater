@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import uuid
-from typing import Iterable
+from collections.abc import Iterable
 
 from qdrant_client.http import models
-from sqlalchemy import select
 
 from src.db_sync import get_db_sync
 from src.embedder.config import EMBED_BATCH_SIZE, EMBED_PARALLEL, QDRANT_COLLECTION
@@ -30,7 +28,9 @@ def _build_points(chunks: list[Chunk]) -> Iterable[models.PointStruct]:
     texts = [c.text for c in chunks]
 
     dense_vecs = dense_model().embed(
-        passage_texts(texts), batch_size=EMBED_BATCH_SIZE, parallel=EMBED_PARALLEL or None
+        passage_texts(texts),
+        batch_size=EMBED_BATCH_SIZE,
+        parallel=EMBED_PARALLEL or None,
     )
     sparse_vecs = sparse_model().embed(texts, batch_size=EMBED_BATCH_SIZE)
     colbert_vecs = colbert_model().embed(
@@ -58,7 +58,9 @@ def _build_points(chunks: list[Chunk]) -> Iterable[models.PointStruct]:
         )
 
 
-def _chunked(it: Iterable[models.PointStruct], n: int) -> Iterable[list[models.PointStruct]]:
+def _chunked(
+    it: Iterable[models.PointStruct], n: int
+) -> Iterable[list[models.PointStruct]]:
     buf: list[models.PointStruct] = []
     for item in it:
         buf.append(item)

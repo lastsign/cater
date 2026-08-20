@@ -23,7 +23,7 @@ class Chunk(UUIDMixin, TimestampMixin, Base):
     text_hash: Mapped[bytes] = mapped_column(nullable=False)
     token_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    content: Mapped["Content"] = relationship(back_populates="chunks")
+    content: Mapped[Content] = relationship(back_populates="chunks")
 
     __table_args__ = (
         UniqueConstraint("content_id", "chunk_index", name="uq_chunks_content_index"),

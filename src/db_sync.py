@@ -1,7 +1,7 @@
 import json
 import os
+from collections.abc import Iterator
 from functools import partial
-from typing import Iterator
 
 from pydantic_core import to_jsonable_python
 from sqlalchemy import create_engine
@@ -38,7 +38,7 @@ SessionLocalSync = sessionmaker(bind=engine_sync, autoflush=False, autocommit=Fa
 #         db.close()
 
 from contextlib import contextmanager
-from typing import Iterator
+
 
 @contextmanager
 def get_db_sync() -> Iterator[Session]:
