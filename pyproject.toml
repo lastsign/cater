@@ -6,7 +6,8 @@ requires-python = ">=3.13,<4.0.0"
 
 [dependency-groups]
 search = [
-    "langchain-qdrant>=1.1.0,<2.0.0"
+    "langchain-elasticsearch>=1.0.0",
+    "langchain-qdrant>=1.1.0,<2.0.0",
 ]
 
 server = [
