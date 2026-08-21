@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from qdrant_client import QdrantClient
+from qdrant_client import AsyncQdrantClient, QdrantClient
 from qdrant_client.http import models
 
 from src.embedder.config import (
@@ -19,6 +19,11 @@ COLBERT_VECTOR_NAME = "colbert"
 @lru_cache(maxsize=1)
 def client() -> QdrantClient:
     return QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, prefer_grpc=True)
+
+
+@lru_cache(maxsize=1)
+def aclient() -> AsyncQdrantClient:
+    return AsyncQdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, prefer_grpc=True)
 
 
 def ensure_collection(collection: str = QDRANT_COLLECTION) -> None:
